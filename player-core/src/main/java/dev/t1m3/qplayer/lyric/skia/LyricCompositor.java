@@ -11,6 +11,7 @@ import io.github.humbleui.skija.Paint;
 import io.github.humbleui.skija.SamplingMode;
 import io.github.humbleui.skija.Shader;
 import io.github.humbleui.skija.Surface;
+import io.github.humbleui.types.RRect;
 import io.github.humbleui.types.Rect;
 
 import io.github.timer_err.qml4j.engine.binding.Property;
@@ -149,6 +150,13 @@ public final class LyricCompositor {
     private float lyShaderTopY = -1f;
     private Shader lyFadeShader;
     private final Paint lyMaskPaint = new Paint();
+    private Item miniPlayerItem;
+    private Rect expandingRect;
+    private float expandingRadius;
+    private float edgeBlurAlpha = 0f;
+    private long edgeBlurAlphaNs = 0L;
+    private float lyShaderF = -1f;
+    private final Paint scrimPaint = new Paint();
 
     // Apple-Music progressive edge blur (opt-in). The column is drawn twice with two
     // COMPLEMENTARY masks that never overlap: a blurred copy kept only at the edges, and a
@@ -270,6 +278,7 @@ public final class LyricCompositor {
         blurBasePaint.close();
         columnBlurPaint.close();
         lyLayerPaint.close();
+        scrimPaint.close();
     }
 
     /** Render-thread recreation resumes at a discontinuous playback position. */
@@ -378,6 +387,7 @@ public final class LyricCompositor {
         lyricChrome = view.findByObjectName("lyricChrome");
         collectNotificationCards(lyricChrome);
         Item miniPlayer = view.findByObjectName("miniPlayer");
+        miniPlayerItem = miniPlayer;
         if (miniPlayer != null) {
             MiniPlayerLoadingAnimation clock = new MiniPlayerLoadingAnimation(miniPlayer);
             clock.parent.set(miniPlayer);
@@ -409,6 +419,25 @@ public final class LyricCompositor {
         for (int i = 0; i < item.children.size(); i++) {
             collectNotificationCards(item.children.get(i));
         }
+    }
+
+    private Rect queryMiniPlayerRect(float viewW, float viewH) {
+        if (miniPlayerItem != null) {
+            try {
+                float x = 0f, y = 0f;
+                for (Item it = miniPlayerItem; it != null; it = it.parent.peek()) {
+                    x += it.x.peekFloat();
+                    y += it.y.peekFloat();
+                    if (it.parent.peek() == null || it == it.parent.peek()) break;
+                }
+                float w = miniPlayerItem.width.peekFloat();
+                float h = miniPlayerItem.height.peekFloat();
+                if (w > 20f && h > 20f && y > 0f) {
+                    return Rect.makeXYWH(x, y, w, h);
+                }
+            } catch (Throwable ignored) {}
+        }
+        return Rect.makeXYWH(12f, Math.max(0f, viewH - 80f), Math.max(0f, viewW - 24f), 64f);
     }
 
     /** Toast cards use translations and uniform scaling, with no rotation or clipping. */
@@ -492,6 +521,7 @@ public final class LyricCompositor {
                                  DirectContext ctx, float uiScale, int fbW, int fbH) {
         float lw = fbW / uiScale, lh = fbH / uiScale;
         if (lyricChrome == null) lyricChrome = view.findByObjectName("lyricChrome");
+        if (miniPlayerItem == null) miniPlayerItem = view.findByObjectName("miniPlayer");
 
         // Three layers so the lyric page slides up OVER the main UI while its md3
         // chrome still sits above the host fluid:
@@ -537,23 +567,37 @@ public final class LyricCompositor {
             // Fully covered and nothing changed: the whole main tree is skipped.
             skippedLayout = true;
         }
-        drawLyricOverlay(canvas, controller, settings, ctx, uiScale, fbW, fbH);
+
+        // Draw backdrop scrim over the main scene while expanding from MiniPlayer
         double slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
+        if (!fullyCovered && slideNow > 0.001) {
+            float scrimAlpha = Math.min(0.55f, (float) slideNow * 0.55f);
+            scrimPaint.setColor(0xFF000000);
+            scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
+            int scS = canvas.save();
+            canvas.scale(uiScale, uiScale);
+            canvas.drawRect(Rect.makeWH(lw, lh), scrimPaint);
+            canvas.restoreToCount(scS);
+        }
+
+        drawLyricOverlay(canvas, controller, settings, ctx, uiScale, fbW, fbH);
+        slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
         if (slideNow > 0.001 && lyricChrome != null) {
             int scC = canvas.save();
             canvas.scale(uiScale, uiScale);
+            int clipChrome = -1;
+            if (slideNow < 0.999 && expandingRect != null) {
+                clipChrome = canvas.save();
+                canvas.clipRRect(RRect.makeXYWH(expandingRect.getLeft(), expandingRect.getTop(),
+                        expandingRect.getWidth(), expandingRect.getHeight(), expandingRadius), true);
+            }
             if (fullyCovered && renderer.pictureCacheEnabled()) {
-                // renderSubtree() intentionally bypasses qml4j's picture cache. Once
-                // the lyric page is stable and fully covers the main scene, render it
-                // as a temporary root so its static direct children (title/buttons)
-                // replay recorded SkPictures. Continuously-changing progress chrome
-                // is detected by qml4j as a hot spot and falls back to direct drawing.
-                // Keep renderSubtree during the slide transition: alternating cache
-                // roots with the main scene there would release/re-record boundaries
-                // every frame and create the native churn this path is meant to avoid.
                 renderer.render(canvas, lyricChrome, true);
             } else {
                 renderer.renderSubtree(canvas, lyricChrome, lw, lh);
+            }
+            if (clipChrome >= 0) {
+                canvas.restoreToCount(clipChrome);
             }
             canvas.restoreToCount(scC);
         }
@@ -779,14 +823,37 @@ public final class LyricCompositor {
             colW = w - 2f * pad;
             colH = h - colTopY - L_TRANSPORT_H;
         }
-        ensureLyricShaders(colTopY, colH);
+        float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
+        ensureLyricShaders(colTopY, colH, ease);
+
+        Rect miniBounds = queryMiniPlayerRect(w, h);
+        float startX = miniBounds.getLeft();
+        float startY = miniBounds.getTop();
+        float startW = miniBounds.getWidth();
+        float startH = miniBounds.getHeight();
+        float startR = Math.min(startH * 0.5f, 28f);
+
+        float curX = (1f - ease) * startX;
+        float curY = (1f - ease) * startY;
+        float curW = (1f - ease) * startW + ease * w;
+        float curH = (1f - ease) * startH + ease * h;
+        float curR = (1f - ease) * startR;
+
+        expandingRect = Rect.makeXYWH(curX, curY, curW, curH);
+        expandingRadius = curR;
+
         int sc = canvas.save();
         canvas.scale(uiScale, uiScale);
 
-        // The page always slides up from the bottom over the main scene. Its QML
-        // chrome uses this same smoothstep progress, so both layers stay locked.
-        float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
-        canvas.translate(0f, (1f - ease) * h);
+        int clipCount = -1;
+        if (lyricSlide < 0.999f) {
+            clipCount = canvas.save();
+            canvas.clipRRect(RRect.makeXYWH(curX, curY, curW, curH, curR), true);
+        }
+
+        // Seamless expand from miniPlayer: translate Y from startY to 0
+        float translateY = (1f - ease) * startY;
+        canvas.translate(0f, translateY);
 
         // 1) fluid backdrop, keyed by the current track (resolved above).
         boolean bgStatic = settings != null && settings.lyricBgStatic();
@@ -905,8 +972,26 @@ public final class LyricCompositor {
             // lines, while avoiding offscreen surface allocations, texture snapshots,
             // and saveLayer blits during the motion. Progressive edge blur engages once
             // the page settles.
-            if (lyricSlide >= 0.99f && Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue())) {
-                drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos);
+            // Progressive edge blur with smooth crossfade to eliminate jump:
+            boolean wantBlur = lyricSlide >= 0.99f && Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue());
+            float targetBlurAlpha = wantBlur ? 1f : 0f;
+            long blurNow = System.nanoTime();
+            if (edgeBlurAlphaNs != 0L) {
+                float dt = (blurNow - edgeBlurAlphaNs) / 1_000_000_000f;
+                if (dt > 0.05f) dt = 0.05f;
+                if (dt > 0f) {
+                    edgeBlurAlpha += (targetBlurAlpha - edgeBlurAlpha) * (1f - (float) Math.exp(-dt / 0.15f));
+                }
+            } else {
+                edgeBlurAlpha = targetBlurAlpha;
+            }
+            edgeBlurAlphaNs = blurNow;
+            if (Math.abs(edgeBlurAlpha - targetBlurAlpha) < 0.005f) {
+                edgeBlurAlpha = targetBlurAlpha;
+            }
+
+            if (edgeBlurAlpha > 0.001f) {
+                drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos, edgeBlurAlpha);
             } else {
                 lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
             }
@@ -915,6 +1000,9 @@ public final class LyricCompositor {
             canvas.restoreToCount(lc);
         }
 
+        if (clipCount >= 0) {
+            canvas.restoreToCount(clipCount);
+        }
         canvas.restoreToCount(sc);
     }
 
@@ -925,7 +1013,8 @@ public final class LyricCompositor {
     // render is one shader draw per syllable, and this path used to pay for two of
     // them plus four full-column layers every frame.
     private void drawProgressiveBlurColumn(Canvas canvas, Rect colRect, float leftX,
-                                           float colTopY, float colW, float colH, long pos) {
+                                           float colTopY, float colW, float colH, long pos,
+                                           float blurAlpha) {
         float sigma = Math.max(1f, LyricConfig.instance.lyricFontSize.getValue() * EDGE_BLUR_SIGMA_RATIO);
         ensureBlurFilter(sigma);
 
@@ -951,15 +1040,30 @@ public final class LyricCompositor {
         LyricSkia.setCanvas(canvas);
 
         try (Image image = snapshot.makeImageSnapshot()) {
-            // Blurred copy, kept only at the edges. The thumbnail gaussian rides on
-            // the blit itself, so no extra layer is needed around it. Drawn under the
-            // page transform (to the local rect covering the snapshot's pixels) so the
-            // blur sigma keeps scaling with it; the blur hides any resampling here.
+            // When crossfading during deferred blur engagement, blit the sharp base first
+            // under the edge fade mask so there is zero pop-in or sudden flash.
+            if (blurAlpha < 0.999f) {
+                int msBase = canvas.saveLayer(colRect, null);
+                int mBase = canvas.save();
+                canvas.resetMatrix();
+                canvas.drawImageRect(image, columnSrcRect, columnDevRect, SamplingMode.DEFAULT, null, true);
+                canvas.restoreToCount(mBase);
+                applyColumnMask(canvas, lyFadeShader);
+                canvas.restoreToCount(msBase);
+            }
+
+            // Blurred copy, kept only at the edges.
             int mb = canvas.saveLayer(colRect, null);
             columnBlurPaint.setImageFilter(blurFilter);
+            if (blurAlpha < 0.999f) {
+                columnBlurPaint.setAlpha(Math.round(255f * blurAlpha));
+            }
             canvas.drawImageRect(image, columnSrcRect, columnLocalRect, SamplingMode.LINEAR,
                     columnBlurPaint, true);
             columnBlurPaint.setImageFilter(null);
+            if (blurAlpha < 0.999f) {
+                columnBlurPaint.setAlpha(255);
+            }
             // Build the band from THIS frame's lit lines (render just refreshed them), so
             // the sharp plateau covers the whole active group rather than one anchor line.
             ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
@@ -967,8 +1071,6 @@ public final class LyricCompositor {
             canvas.restoreToCount(mb);
 
             // Sharp copy, kept only across the focus band (complementary mask, no overlap).
-            // Copied 1:1 onto the whole device pixels it was rendered for, so the focus
-            // band is never resampled at a fractional offset or a non-100% UI scale.
             int ms = canvas.saveLayer(colRect, null);
             int m = canvas.save();
             canvas.resetMatrix();
@@ -1068,6 +1170,10 @@ public final class LyricCompositor {
         pageCachesReleased = true;
         closeColumnSurface();
         lyricRenderer.releaseRasterCaches();
+        edgeBlurAlpha = 0f;
+        edgeBlurAlphaNs = 0L;
+        expandingRect = null;
+        expandingRadius = 0f;
     }
 
     void applyColumnMask(Canvas canvas, Shader shader) {
@@ -1149,11 +1255,17 @@ public final class LyricCompositor {
     // (top tracks the status-bar inset, which can settle late; both change on a
     // portrait<->landscape flip).
     private void ensureLyricShaders(float topY, float colH) {
-        if (topY == lyShaderTopY && colH == lyShaderColH && lyFadeShader != null) return;
+        ensureLyricShaders(topY, colH, 1f);
+    }
+
+    private void ensureLyricShaders(float topY, float colH, float ease) {
+        float baseF = Math.min(0.4f, 40f / colH);
+        float f = ease < 0.99f ? (1f - ease) * 0.22f + ease * baseF : baseF;
+        if (topY == lyShaderTopY && colH == lyShaderColH && Math.abs(f - lyShaderF) < 0.005f && lyFadeShader != null) return;
         lyShaderTopY = topY;
         lyShaderColH = colH;
+        lyShaderF = f;
         if (lyFadeShader != null) lyFadeShader.close();
-        float f = Math.min(0.4f, 40f / colH);
         lyFadeShader = Shader.makeLinearGradient(
                 0f, topY, 0f, topY + colH,
                 new int[]{0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
