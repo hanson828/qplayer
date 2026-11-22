@@ -199,6 +199,7 @@ public final class LyricCompositor {
     // first frame that draws the page again.
     private boolean pageCachesReleased;
     private boolean compositorGpuPrewarmed;
+    private String prewarmedMediaId;
     private float bandShaderColH = -1f;
     private float bandShaderTopY = -1f;
     private float bandFracTop = -1f, bandFracBottom = -1f; // cached lit-band fractions
@@ -638,7 +639,7 @@ public final class LyricCompositor {
             skippedLayout = true;
         }
 
-        // Draw backdrop frosted glass blur + theme-adaptive scrim over the main scene while expanding
+        // Draw backdrop theme-adaptive scrim over the main scene while expanding
         double slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
         if (!fullyCovered && slideNow > 0.001) {
             float ease = (float) (slideNow * slideNow * (3.0 - 2.0 * slideNow));
@@ -650,18 +651,9 @@ public final class LyricCompositor {
             scrimPaint.setColor(scrimColor);
             scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
 
-            float blurSigma = Math.min(10f, ease * 10f);
             int scS = canvas.save();
             canvas.scale(uiScale, uiScale);
-            Rect fullBounds = Rect.makeWH(lw, lh);
-            if (blurSigma >= 1.0f && ctx != null) {
-                ImageFilter blurFilter = ensureScrimBlurFilter(blurSigma);
-                SaveLayerRec rec = new SaveLayerRec(fullBounds, scrimPaint, blurFilter);
-                int blLayer = canvas.saveLayer(rec);
-                canvas.restoreToCount(blLayer);
-            } else {
-                canvas.drawRect(fullBounds, scrimPaint);
-            }
+            canvas.drawRect(Rect.makeWH(lw, lh), scrimPaint);
             canvas.restoreToCount(scS);
         }
 
@@ -721,10 +713,11 @@ public final class LyricCompositor {
         boolean open = Boolean.TRUE.equals(controller.lyricsOpen.peek());
         float target = open ? 1f : 0f;
         // The lyric page is a spatial bottom sheet, independent of the navigation
-        // page preset. Ease a little more slowly than the old 0.22 response while
+        // page preset. Ease a little more slowly than the old 0.22/0.18 response while
         // retaining the same interruptible, frame-stable approach.
-        lyricSlide += (target - lyricSlide) * 0.18f;
-        if (Math.abs(target - lyricSlide) < 0.002f) lyricSlide = target;
+        // 转场速率进一步调慢至优雅舒缓的柔和节奏（0.11f，约 380~420ms，舒展自然）
+        lyricSlide += (target - lyricSlide) * 0.11f;
+        if (Math.abs(target - lyricSlide) < 0.001f) lyricSlide = target;
         // Publish to QML so the LyricOverlay chrome fades in/out in lockstep. set()
         // no-ops on an unchanged value, so once settled-closed this stops bumping the
         // change version.
@@ -769,22 +762,25 @@ public final class LyricCompositor {
                             ensureBlurFilter(sigma);
                         } catch (Throwable ignored) {}
                     }
-                    if (lyricRenderer.hasLines()) {
-                        long rawPos = controller.isLyricClockRunning() ? lyBaseMs : controller.positionMs.peek();
-                        long pos = Math.max(0L, rawPos - LyricConfig.instance.offsetMs.getValue() - DEFAULT_AUDIO_COMPENSATION_MS);
-                        lyricRenderer.prewarmLayout(colW, pos, 64);
-                        // Prewarm GPU glyph atlas by drawing active visible lines once into an offscreen 1x1 GPU surface
-                        try (Surface dummyGpu = Surface.makeRenderTarget(ctx, false, ImageInfo.makeN32Premul(1, 1))) {
-                            if (dummyGpu != null) {
-                                lyricRenderer.render(dummyGpu.getCanvas(), 0f, 0f, colW, colH, pos);
-                            }
-                        } catch (Throwable ignored) {}
-                    }
                 }
 
                 if (lyricRenderer.hasLines()) {
-                    long pos = controller.isLyricClockRunning() ? lyBaseMs : controller.positionMs.peek();
-                    lyricRenderer.prewarmLayout(colW, pos, 4);
+                    long rawPos = controller.isLyricClockRunning() ? lyBaseMs : controller.positionMs.peek();
+                    long pos = Math.max(0L, rawPos - LyricConfig.instance.offsetMs.getValue() - DEFAULT_AUDIO_COMPENSATION_MS);
+                    String mediaId = controller.currentMediaId.peek();
+                    if (!Objects.equals(prewarmedMediaId, mediaId)) {
+                        prewarmedMediaId = mediaId;
+                        lyricRenderer.prewarmLayout(colW, pos, 64);
+                        if (ctx != null) {
+                            try (Surface dummyGpu = Surface.makeRenderTarget(ctx, false, ImageInfo.makeN32Premul(1, 1))) {
+                                if (dummyGpu != null) {
+                                    lyricRenderer.render(dummyGpu.getCanvas(), 0f, 0f, colW, colH, pos);
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                    } else {
+                        lyricRenderer.prewarmLayout(colW, pos, 4);
+                    }
                 }
             }
             return;
@@ -967,33 +963,18 @@ public final class LyricCompositor {
             }
         }
 
-        // Seamless expand from miniPlayer: translate Y from startY to 0
-        float translateY = (1f - ease) * startY;
-        canvas.translate(0f, translateY);
+        // The expanding container (expandingRect) already animates its bounds and radius
+        // from miniBounds to fullBounds. No additional canvas Y translation is needed,
+        // which would otherwise shove the content off-screen downwards.
 
         // 1) fluid backdrop, keyed by the current track (resolved above).
         boolean bgStatic = settings != null && settings.lyricBgStatic();
         int bgStyle = settings != null
                 ? settings.lyricBgStyle() : FluidBackground.STYLE_MESH_GRADIENT;
         int bgSaturation = settings != null ? settings.lyricBgSaturation() : 100;
-        if (backdropClipRect == null || backdropClipW != w || backdropClipH != h) {
-            backdropClipRect = Rect.makeWH(w, h);
-            backdropClipW = w;
-            backdropClipH = h;
-        }
-        int bgClip = canvas.save();
-        canvas.clipRect(backdropClipRect);
         float fluidAlpha = Math.min(1.0f, ease * 2.2f);
-        int fluidLayer = -1;
-        if (lyricSlide < 0.999f && fluidAlpha < 0.999f) {
-            fluidLayer = canvas.saveLayerAlpha(backdropClipRect, Math.round(fluidAlpha * 255f));
-        }
         fluidBg.render(canvas, ctx, uiScale, w, h, cover, lyCoverKey,
-                System.nanoTime(), bgStatic, bgStyle, bgSaturation);
-        if (fluidLayer >= 0) {
-            canvas.restoreToCount(fluidLayer);
-        }
-        canvas.restoreToCount(bgClip);
+                System.nanoTime(), bgStatic, bgStyle, bgSaturation, fluidAlpha);
 
         // 2) the lyrics column. The title (top band) and transport (bottom band) are
         // drawn by the QML LyricOverlay on top of this; only the lyrics column is
@@ -1244,8 +1225,10 @@ public final class LyricCompositor {
      *  first edge-blur frame, glyph rasters on the first animated row). */
     private void releasePageCaches() {
         pageCachesReleased = true;
-        closeColumnSurface();
-        lyricRenderer.releaseRasterCaches();
+        // Keep columnSurface and lyricRenderer glyph raster caches alive while the app is running
+        // so reopening the page never hitches on re-allocating GPU surfaces or re-rasterizing text.
+        // closeColumnSurface();
+        // lyricRenderer.releaseRasterCaches();
         expandingRect = null;
         expandingRadius = 0f;
         if (scrimBlurFilter != null) {

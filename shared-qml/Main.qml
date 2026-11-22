@@ -987,6 +987,7 @@ Rectangle {
     LyricOverlay {
         id: lyricOverlay
         objectName: "lyricChrome"   // host renders this subtree in its own pass, over the fluid
+        miniPlayer: mini
         property real transitionEase: {
             var s = player.lyricSlide
             return s * s * (3 - 2 * s)
@@ -995,12 +996,12 @@ Rectangle {
         width: parent.width - settings.leftInset - settings.rightInset
         height: parent.height
         visible: player.lyricSlide > 0.001 || lyricOverlay.prewarming
-        opacity: player.lyricSlide > 0.001 ? Math.min(1.0, transitionEase * 2.5) : 0
+        opacity: player.lyricSlide > 0.001 ? 1 : 0
         // Desktop hides its custom title bar while the lyric page is open (see the
         // TitleBar below), so the three title buttons sit flush at the very top.
         topPad: hostWindow.available ? 6 : (settings.topInset > 0 ? settings.topInset + 6 : 12)
         onCloseRequested: app.popPage()
-        y: player.lyricSlide > 0.001 ? (1 - transitionEase) * (mini.y > 0 ? mini.y : height) : height
+        y: 0
     }
 
     TemperaLayer { anchors.fill: parent }
