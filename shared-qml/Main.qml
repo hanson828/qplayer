@@ -65,6 +65,9 @@ Rectangle {
     // the separately composited lyric page, uses this same motion vocabulary.
     // Zoom is the default; the final preset is an instant accessibility fallback.
     property int pageTransitionPreset: settings.value("pageTransitionPreset")
+    // Mobile/Android guarantees a minimum top clearance in fullscreen/immersive modes
+    // where settings.topInset collapses to 0. Desktop keeps its custom caption bar inset.
+    readonly property real effectiveTopInset: hostWindow.available ? settings.topInset : (settings.topInset > 0 ? settings.topInset : 8)
     // Build only the initial home page on startup; the idle prewarm (see
     // prewarmTimer) then builds the lazy root destinations in idle time. Once
     // built, a page remains loaded so navigation state and close animations are
@@ -166,7 +169,10 @@ Rectangle {
     property bool wide: app.width >= 600
     property bool expanded: app.width >= 840
     readonly property bool liquidGlassEffects: settings.value("liquidGlassNavigation") === true
-    readonly property bool floatingBottomChrome: !app.wide && app.liquidGlassEffects
+    // Liquid glass is a look, not a compact-layout feature: any width whose bar
+    // is wide enough for the ordinary transport keeps it, and the capsule grows
+    // to the window. See MiniPlayer's wideLayout for which controls it carries.
+    readonly property bool floatingBottomChrome: app.liquidGlassEffects
     // Every page extends behind the player; scroll padding keeps its last item
     // above the transport, including compact navigation and system insets.
     readonly property real bottomContentInset: Math.max(0, app.height - mini.y + 8)
@@ -674,7 +680,7 @@ Rectangle {
         id: rootTopChrome
         property real baseLeft: rail.x + rail.width
         x: baseLeft + rootPageMotion.contentX
-        y: settings.topInset + rootPageMotion.contentY
+        y: app.effectiveTopInset + rootPageMotion.contentY
         width: app.width - baseLeft - settings.rightInset
         height: Ui.headerHeight
         scale: rootPageMotion.contentScale
@@ -698,7 +704,7 @@ Rectangle {
     Item {
         id: pageWrap
         anchors.top: parent.top
-        anchors.topMargin: settings.topInset
+        anchors.topMargin: app.effectiveTopInset
         anchors.left: rail.right
         anchors.right: parent.right
         anchors.rightMargin: settings.rightInset
@@ -919,7 +925,7 @@ Rectangle {
         x: settings.leftInset
            + (app.width >= Ui.expandedMin ? Ui.sidebarWide
               : (app.width >= Ui.compactMax ? Ui.sidebarNarrow : 0))
-        y: settings.topInset
+        y: app.effectiveTopInset
            + (app.currentOverlay === "" ? rootTopChrome.height : 0)
         width: Math.max(0, app.width - settings.leftInset - settings.rightInset
                         - (app.width >= Ui.expandedMin ? Ui.sidebarWide
@@ -937,7 +943,10 @@ Rectangle {
         anchors.leftMargin: app.floatingBottomChrome ? 24 : 12
         anchors.rightMargin: settings.rightInset + (app.floatingBottomChrome ? 24 : 12)
         anchors.bottom: bottomNav.top
-        anchors.bottomMargin: app.wide ? 12 : 8
+        // The compact pill keeps the bottom navigation's own 36dp safe-area
+        // padding; where the rail replaces that bar there is nothing below the
+        // pill, so glass needs its own 24dp gap like the one on both sides.
+        anchors.bottomMargin: app.wide ? (app.floatingBottomChrome ? 24 : 12) : 8
         height: implicitHeight
         liquidGlass: app.floatingBottomChrome
         onLyricsRequested: app.pushPage("lyrics", 0)
@@ -980,7 +989,7 @@ Rectangle {
         visible: player.lyricSlide > 0.001
         // Desktop hides its custom title bar while the lyric page is open (see the
         // TitleBar below), so the three title buttons sit flush at the very top.
-        topPad: hostWindow.available ? 6 : settings.topInset + 6
+        topPad: hostWindow.available ? 6 : (settings.topInset > 0 ? settings.topInset + 6 : 12)
         onCloseRequested: app.popPage()
         y: (1 - transitionEase) * height
     }
