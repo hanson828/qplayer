@@ -9,6 +9,7 @@ import io.github.humbleui.skija.ImageInfo;
 import io.github.humbleui.skija.Matrix33;
 import io.github.humbleui.skija.Paint;
 import io.github.humbleui.skija.SamplingMode;
+import io.github.humbleui.skija.SaveLayerRec;
 import io.github.humbleui.skija.Shader;
 import io.github.humbleui.skija.Surface;
 import io.github.humbleui.types.RRect;
@@ -18,6 +19,7 @@ import io.github.timer_err.qml4j.engine.binding.Property;
 import io.github.timer_err.qml4j.render.QmlView;
 import io.github.timer_err.qml4j.render.Renderer;
 import io.github.timer_err.qml4j.render.items.core.Item;
+import io.github.timer_err.qml4j.runtime.member.MemberAccess;
 
 import dev.t1m3.qplayer.bridge.PlayerController;
 import dev.t1m3.qplayer.lyric.LyricLine;
@@ -157,6 +159,9 @@ public final class LyricCompositor {
     private long edgeBlurAlphaNs = 0L;
     private float lyShaderF = -1f;
     private final Paint scrimPaint = new Paint();
+    private final Paint cardBasePaint = new Paint();
+    private ImageFilter scrimBlurFilter;
+    private float lastScrimSigma = -1f;
 
     // Apple-Music progressive edge blur (opt-in). The column is drawn twice with two
     // COMPLEMENTARY masks that never overlap: a blurred copy kept only at the edges, and a
@@ -274,11 +279,16 @@ public final class LyricCompositor {
             blurFilter.close();
             blurFilter = null;
         }
+        if (scrimBlurFilter != null) {
+            scrimBlurFilter.close();
+            scrimBlurFilter = null;
+        }
         lyMaskPaint.close();
         blurBasePaint.close();
         columnBlurPaint.close();
         lyLayerPaint.close();
         scrimPaint.close();
+        cardBasePaint.close();
     }
 
     /** Render-thread recreation resumes at a discontinuous playback position. */
@@ -440,6 +450,69 @@ public final class LyricCompositor {
         return Rect.makeXYWH(12f, Math.max(0f, viewH - 80f), Math.max(0f, viewW - 24f), 64f);
     }
 
+    private float queryMiniPlayerRadius(float miniH) {
+        if (miniPlayerItem != null) {
+            try {
+                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
+                if (lgProp != null && Boolean.TRUE.equals(lgProp.peek())) {
+                    return miniH * 0.5f;
+                }
+                Property<?> radProp = MemberAccess.propertyOf(miniPlayerItem, "radius");
+                if (radProp != null) {
+                    float r = radProp.peekFloat();
+                    if (r > 0f) return r;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return miniH * 0.5f;
+    }
+
+    private int queryMiniPlayerSurfaceColor(SettingsBridge settings) {
+        if (miniPlayerItem != null) {
+            try {
+                for (int i = 0; i < miniPlayerItem.children.size(); i++) {
+                    Item child = miniPlayerItem.children.get(i);
+                    if ("liquidGlassMiniPlayerSurface".equals(child.objectName.peek())) {
+                        Property<?> col = MemberAccess.propertyOf(child, "surfaceColor");
+                        if (col != null) {
+                            return Renderer.parseColor(String.valueOf(col.peek()));
+                        }
+                    }
+                }
+                Property<?> colProp = MemberAccess.propertyOf(miniPlayerItem, "color");
+                if (colProp != null) {
+                    String s = String.valueOf(colProp.peek());
+                    if (!s.isEmpty() && !"transparent".equalsIgnoreCase(s)) {
+                        return Renderer.parseColor(s);
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        boolean isDark = settings == null || settings.resolvedDarkValue();
+        return isDark ? 0xFF242424 : 0xFFFFFFFF;
+    }
+
+    private boolean isMiniPlayerLiquidGlass() {
+        if (miniPlayerItem != null) {
+            try {
+                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
+                if (lgProp != null) return Boolean.TRUE.equals(lgProp.peek());
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
+    private ImageFilter ensureScrimBlurFilter(float sigma) {
+        float q = Math.round(sigma * 2f) * 0.5f;
+        if (scrimBlurFilter != null && Math.abs(q - lastScrimSigma) < 0.25f) {
+            return scrimBlurFilter;
+        }
+        if (scrimBlurFilter != null) scrimBlurFilter.close();
+        lastScrimSigma = q;
+        scrimBlurFilter = ThumbnailBlur.gaussian(q);
+        return scrimBlurFilter;
+    }
+
     /** Toast cards use translations and uniform scaling, with no rotation or clipping. */
     private static boolean notificationContains(Item card, float x, float y) {
         float left = 0f, top = 0f;
@@ -568,15 +641,29 @@ public final class LyricCompositor {
             skippedLayout = true;
         }
 
-        // Draw backdrop scrim over the main scene while expanding from MiniPlayer
+        // Draw backdrop frosted glass blur + theme-adaptive scrim over the main scene while expanding
         double slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
         if (!fullyCovered && slideNow > 0.001) {
-            float scrimAlpha = Math.min(0.55f, (float) slideNow * 0.55f);
-            scrimPaint.setColor(0xFF000000);
+            float ease = (float) (slideNow * slideNow * (3.0 - 2.0 * slideNow));
+            boolean isDark = settings == null || settings.resolvedDarkValue();
+            float maxAlpha = isDark ? 0.45f : 0.20f;
+            float scrimAlpha = Math.min(maxAlpha, ease * maxAlpha);
+            int scrimColor = isDark ? 0xFF000000 : 0xFF181818;
+            scrimPaint.setColor(scrimColor);
             scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
+
+            float blurSigma = Math.min(16f, ease * 16f);
             int scS = canvas.save();
             canvas.scale(uiScale, uiScale);
-            canvas.drawRect(Rect.makeWH(lw, lh), scrimPaint);
+            Rect fullBounds = Rect.makeWH(lw, lh);
+            if (blurSigma >= 1.0f && ctx != null) {
+                ImageFilter blurFilter = ensureScrimBlurFilter(blurSigma);
+                SaveLayerRec rec = new SaveLayerRec(fullBounds, scrimPaint, blurFilter);
+                int blLayer = canvas.saveLayer(rec);
+                canvas.restoreToCount(blLayer);
+            } else {
+                canvas.drawRect(fullBounds, scrimPaint);
+            }
             canvas.restoreToCount(scS);
         }
 
@@ -831,7 +918,9 @@ public final class LyricCompositor {
         float startY = miniBounds.getTop();
         float startW = miniBounds.getWidth();
         float startH = miniBounds.getHeight();
-        float startR = Math.min(startH * 0.5f, 28f);
+        float startR = queryMiniPlayerRadius(startH);
+        int surfaceColor = queryMiniPlayerSurfaceColor(settings);
+        boolean isLiquidGlass = isMiniPlayerLiquidGlass();
 
         float curX = (1f - ease) * startX;
         float curY = (1f - ease) * startY;
@@ -851,6 +940,17 @@ public final class LyricCompositor {
             canvas.clipRRect(RRect.makeXYWH(curX, curY, curW, curH, curR), true);
         }
 
+        // Fill expanding container base with MiniPlayer's exact surfaceColor
+        // so at ease=0 it matches the MiniPlayer's appearance perfectly without color jumps
+        if (lyricSlide < 0.999f) {
+            float baseAlpha = Math.max(0f, 1f - ease * 1.6f);
+            if (baseAlpha > 0.001f) {
+                cardBasePaint.setColor(surfaceColor);
+                cardBasePaint.setAlpha(Math.round(baseAlpha * (isLiquidGlass ? 200f : 255f)));
+                canvas.drawRect(expandingRect, cardBasePaint);
+            }
+        }
+
         // Seamless expand from miniPlayer: translate Y from startY to 0
         float translateY = (1f - ease) * startY;
         canvas.translate(0f, translateY);
@@ -867,8 +967,16 @@ public final class LyricCompositor {
         }
         int bgClip = canvas.save();
         canvas.clipRect(backdropClipRect);
+        float fluidAlpha = Math.min(1.0f, ease * 2.2f);
+        int fluidLayer = -1;
+        if (lyricSlide < 0.999f && fluidAlpha < 0.999f) {
+            fluidLayer = canvas.saveLayerAlpha(backdropClipRect, Math.round(fluidAlpha * 255f));
+        }
         fluidBg.render(canvas, ctx, uiScale, w, h, cover, lyCoverKey,
                 System.nanoTime(), bgStatic, bgStyle, bgSaturation);
+        if (fluidLayer >= 0) {
+            canvas.restoreToCount(fluidLayer);
+        }
         canvas.restoreToCount(bgClip);
 
         // 2) the lyrics column. The title (top band) and transport (bottom band) are
@@ -1174,6 +1282,11 @@ public final class LyricCompositor {
         edgeBlurAlphaNs = 0L;
         expandingRect = null;
         expandingRadius = 0f;
+        if (scrimBlurFilter != null) {
+            scrimBlurFilter.close();
+            scrimBlurFilter = null;
+            lastScrimSigma = -1f;
+        }
     }
 
     void applyColumnMask(Canvas canvas, Shader shader) {
