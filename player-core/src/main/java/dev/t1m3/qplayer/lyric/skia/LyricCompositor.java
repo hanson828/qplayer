@@ -155,9 +155,6 @@ public final class LyricCompositor {
     private Item miniPlayerItem;
     private Rect expandingRect;
     private float expandingRadius;
-    private float edgeBlurAlpha = 0f;
-    private long edgeBlurAlphaNs = 0L;
-    private float lyShaderF = -1f;
     private final Paint scrimPaint = new Paint();
     private final Paint cardBasePaint = new Paint();
     private ImageFilter scrimBlurFilter;
@@ -911,7 +908,7 @@ public final class LyricCompositor {
             colH = h - colTopY - L_TRANSPORT_H;
         }
         float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
-        ensureLyricShaders(colTopY, colH, ease);
+        ensureLyricShaders(colTopY, colH);
 
         Rect miniBounds = queryMiniPlayerRect(w, h);
         float startX = miniBounds.getLeft();
@@ -1066,40 +1063,11 @@ public final class LyricCompositor {
             // its resting place while it fades in.
             if (trackReveal < 1f) canvas.translate(0f, (1f - trackReveal) * TRACK_REVEAL_RISE);
             LyricSkia.setCanvas(canvas);
-            // The edge blur used to be gated off for the ~200-300 ms the cover<->lyrics
-            // switch is moving: it cost three nested saveLayers and rendered the column
-            // TWICE (one shader draw per visible syllable each), and with no dirty-rect
-            // rendering in this engine two heavy things animating at once is what janks.
-            // It now renders the column ONCE into a GPU surface and blits that snapshot
-            // twice - sharp for the focus band, half-resolution thumbnail gaussian for
-            // the edges - so it stays on through the transition instead of popping in
-            // the moment the motion lands. See drawProgressiveBlurColumn.
-            // During the bottom-sheet slide transition (lyricSlide < 0.99f), draw
-            // lyrics directly without the multi-pass GPU snapshot blur. The vertical
-            // alpha fade (lyFadeShader below) already cleanly fades the top and bottom
-            // lines, while avoiding offscreen surface allocations, texture snapshots,
-            // and saveLayer blits during the motion. Progressive edge blur engages once
-            // the page settles.
-            // Progressive edge blur with smooth crossfade to eliminate jump:
-            boolean wantBlur = lyricSlide >= 0.99f && Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue());
-            float targetBlurAlpha = wantBlur ? 1f : 0f;
-            long blurNow = System.nanoTime();
-            if (edgeBlurAlphaNs != 0L) {
-                float dt = (blurNow - edgeBlurAlphaNs) / 1_000_000_000f;
-                if (dt > 0.05f) dt = 0.05f;
-                if (dt > 0f) {
-                    edgeBlurAlpha += (targetBlurAlpha - edgeBlurAlpha) * (1f - (float) Math.exp(-dt / 0.15f));
-                }
-            } else {
-                edgeBlurAlpha = targetBlurAlpha;
-            }
-            edgeBlurAlphaNs = blurNow;
-            if (Math.abs(edgeBlurAlpha - targetBlurAlpha) < 0.005f) {
-                edgeBlurAlpha = targetBlurAlpha;
-            }
-
-            if (edgeBlurAlpha > 0.001f) {
-                drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos, edgeBlurAlpha);
+            // Progressive edge blur stays on continuously whenever enabled;
+            // rendering the column once into a GPU surface and blitting that snapshot
+            // ensures zero pop-in/jump during or at the end of the expand transition.
+            if (Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue())) {
+                drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos);
             } else {
                 lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
             }
@@ -1121,8 +1089,7 @@ public final class LyricCompositor {
     // render is one shader draw per syllable, and this path used to pay for two of
     // them plus four full-column layers every frame.
     private void drawProgressiveBlurColumn(Canvas canvas, Rect colRect, float leftX,
-                                           float colTopY, float colW, float colH, long pos,
-                                           float blurAlpha) {
+                                           float colTopY, float colW, float colH, long pos) {
         float sigma = Math.max(1f, LyricConfig.instance.lyricFontSize.getValue() * EDGE_BLUR_SIGMA_RATIO);
         ensureBlurFilter(sigma);
 
@@ -1148,30 +1115,12 @@ public final class LyricCompositor {
         LyricSkia.setCanvas(canvas);
 
         try (Image image = snapshot.makeImageSnapshot()) {
-            // When crossfading during deferred blur engagement, blit the sharp base first
-            // under the edge fade mask so there is zero pop-in or sudden flash.
-            if (blurAlpha < 0.999f) {
-                int msBase = canvas.saveLayer(colRect, null);
-                int mBase = canvas.save();
-                canvas.resetMatrix();
-                canvas.drawImageRect(image, columnSrcRect, columnDevRect, SamplingMode.DEFAULT, null, true);
-                canvas.restoreToCount(mBase);
-                applyColumnMask(canvas, lyFadeShader);
-                canvas.restoreToCount(msBase);
-            }
-
             // Blurred copy, kept only at the edges.
             int mb = canvas.saveLayer(colRect, null);
             columnBlurPaint.setImageFilter(blurFilter);
-            if (blurAlpha < 0.999f) {
-                columnBlurPaint.setAlpha(Math.round(255f * blurAlpha));
-            }
             canvas.drawImageRect(image, columnSrcRect, columnLocalRect, SamplingMode.LINEAR,
                     columnBlurPaint, true);
             columnBlurPaint.setImageFilter(null);
-            if (blurAlpha < 0.999f) {
-                columnBlurPaint.setAlpha(255);
-            }
             // Build the band from THIS frame's lit lines (render just refreshed them), so
             // the sharp plateau covers the whole active group rather than one anchor line.
             ensureBandShaders(colTopY, colH, lyricRenderer.litBandBounds());
@@ -1278,8 +1227,6 @@ public final class LyricCompositor {
         pageCachesReleased = true;
         closeColumnSurface();
         lyricRenderer.releaseRasterCaches();
-        edgeBlurAlpha = 0f;
-        edgeBlurAlphaNs = 0L;
         expandingRect = null;
         expandingRadius = 0f;
         if (scrimBlurFilter != null) {
@@ -1368,17 +1315,11 @@ public final class LyricCompositor {
     // (top tracks the status-bar inset, which can settle late; both change on a
     // portrait<->landscape flip).
     private void ensureLyricShaders(float topY, float colH) {
-        ensureLyricShaders(topY, colH, 1f);
-    }
-
-    private void ensureLyricShaders(float topY, float colH, float ease) {
-        float baseF = Math.min(0.4f, 40f / colH);
-        float f = ease < 0.99f ? (1f - ease) * 0.22f + ease * baseF : baseF;
-        if (topY == lyShaderTopY && colH == lyShaderColH && Math.abs(f - lyShaderF) < 0.005f && lyFadeShader != null) return;
+        if (topY == lyShaderTopY && colH == lyShaderColH && lyFadeShader != null) return;
         lyShaderTopY = topY;
         lyShaderColH = colH;
-        lyShaderF = f;
         if (lyFadeShader != null) lyFadeShader.close();
+        float f = Math.min(0.4f, 40f / colH);
         lyFadeShader = Shader.makeLinearGradient(
                 0f, topY, 0f, topY + colH,
                 new int[]{0x00FFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00FFFFFF},
