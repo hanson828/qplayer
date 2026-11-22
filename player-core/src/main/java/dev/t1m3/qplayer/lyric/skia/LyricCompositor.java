@@ -643,13 +643,14 @@ public final class LyricCompositor {
         if (!fullyCovered && slideNow > 0.001) {
             float ease = (float) (slideNow * slideNow * (3.0 - 2.0 * slideNow));
             boolean isDark = settings == null || settings.resolvedDarkValue();
-            float maxAlpha = isDark ? 0.45f : 0.20f;
+            boolean isLg = isMiniPlayerLiquidGlass();
+            float maxAlpha = isLg ? (isDark ? 0.16f : 0.06f) : (isDark ? 0.22f : 0.09f);
             float scrimAlpha = Math.min(maxAlpha, ease * maxAlpha);
             int scrimColor = isDark ? 0xFF000000 : 0xFF181818;
             scrimPaint.setColor(scrimColor);
             scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
 
-            float blurSigma = Math.min(16f, ease * 16f);
+            float blurSigma = Math.min(10f, ease * 10f);
             int scS = canvas.save();
             canvas.scale(uiScale, uiScale);
             Rect fullBounds = Rect.makeWH(lw, lh);
@@ -938,13 +939,31 @@ public final class LyricCompositor {
         }
 
         // Fill expanding container base with MiniPlayer's exact surfaceColor
-        // so at ease=0 it matches the MiniPlayer's appearance perfectly without color jumps
+        // so at ease=0 it matches the MiniPlayer's appearance perfectly without color jumps.
+        // For liquid glass:
+        // The MiniPlayer capsule is already a live translucent glass element. Drawing an opaque
+        // card base over it completely hides the glass state when collapsing back.
+        // Thus for liquid glass, keep baseAlpha low and gracefully fade it to 0 as ease -> 0,
+        // so the live liquid glass with its refraction, blur, and bloom smoothly shines through.
         if (lyricSlide < 0.999f) {
-            float baseAlpha = Math.max(0f, 1f - ease * 1.6f);
-            if (baseAlpha > 0.001f) {
-                cardBasePaint.setColor(surfaceColor);
-                cardBasePaint.setAlpha(Math.round(baseAlpha * (isLiquidGlass ? 200f : 255f)));
-                canvas.drawRect(expandingRect, cardBasePaint);
+            float baseAlpha;
+            if (isLiquidGlass) {
+                baseAlpha = Math.max(0f, 1f - ease * 1.6f) * Math.min(1f, ease * 5f);
+                boolean isDark = settings == null || settings.resolvedDarkValue();
+                float maxGlassAlpha = isDark ? 36f : 24f;
+                int alpha = Math.round(baseAlpha * maxGlassAlpha);
+                if (alpha > 0) {
+                    cardBasePaint.setColor(surfaceColor);
+                    cardBasePaint.setAlpha(alpha);
+                    canvas.drawRect(expandingRect, cardBasePaint);
+                }
+            } else {
+                baseAlpha = Math.max(0f, 1f - ease * 1.6f);
+                if (baseAlpha > 0.001f) {
+                    cardBasePaint.setColor(surfaceColor);
+                    cardBasePaint.setAlpha(Math.round(baseAlpha * 255f));
+                    canvas.drawRect(expandingRect, cardBasePaint);
+                }
             }
         }
 
