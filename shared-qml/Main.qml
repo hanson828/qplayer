@@ -21,6 +21,7 @@ Rectangle {
     property bool showLog: false
     property bool volumeOpen: false
     property bool sleepTimerOpen: false
+    property real lastBackPressTime: 0
     // 播放队列 is a bottom sheet, not a route: it slides up over whatever page is
     // showing, so opening it never disturbs the page/route the user is on.
     property bool queueSheetOpen: false
@@ -255,7 +256,15 @@ Rectangle {
         if (app.showLog)            { app.showLog = false; return; }
         if (app.navigationStack.length > 0) { app.popPage(); return; }
         if (app.page !== 0)         { app.switchTo(0); return; }
-        // Android hosts move the task to the background; they do not finish it.
+        // Android hosts move the task to the background; prompt "Swipe again to return to home" on first back.
+        if (!hostWindow.available) {
+            var now = Date.now()
+            if (now - app.lastBackPressTime > 2000) {
+                app.lastBackPressTime = now
+                app.showToast(i18n.t("toast.exitPrompt"))
+                return
+            }
+        }
         player.requestExit();
     }
 
@@ -327,6 +336,7 @@ Rectangle {
     }
 
     function pushPage(which, entityId) {
+        app.clearToast()
         app.dismissTextInput()
         if (which === "") return
         app.ensurePageLoaded(which)
@@ -374,6 +384,7 @@ Rectangle {
     }
 
     function popPage() {
+        app.clearToast()
         if (app.navigationStack.length === 0) return
         var departing = app.topRouteValue()
         app.navigationDirection = "back"
@@ -396,6 +407,7 @@ Rectangle {
     }
 
     function clearPages() {
+        app.clearToast()
         pageTransitionCleanup.stop()
         app.navigationDirection = "replace"
         app.transitionUnderlayType = ""
@@ -607,6 +619,7 @@ Rectangle {
     // trees being laid out during the transition.
     function switchTo(idx) {
         if (idx < 0 || idx >= app.navItems.length) return
+        app.clearToast()
         var returningFromRoute = app.navigationStack.length > 0
         app.clearPages()
         if (idx === app.page) {
@@ -659,6 +672,10 @@ Rectangle {
     function showToast(message) {
         snack.show(message)
         lyricOverlay.showToast(message)
+    }
+    function clearToast() {
+        snack.clearImmediately()
+        lyricOverlay.clearToast()
     }
     property string toastWatch: player.toast
     onToastWatchChanged: if (player.toast.length > 0) app.showToast(player.toast)
@@ -956,7 +973,6 @@ Rectangle {
         anchors.bottomMargin: app.wide ? (app.floatingBottomChrome ? 24 : 12) : 8
         height: implicitHeight
         liquidGlass: app.floatingBottomChrome
-        opacity: player.lyricSlide > 0.001 ? Math.max(0, 1 - player.lyricSlide * 3.0) : 1
         onLyricsRequested: app.pushPage("lyrics", 0)
         onQueueRequested: app.openQueue()
     }

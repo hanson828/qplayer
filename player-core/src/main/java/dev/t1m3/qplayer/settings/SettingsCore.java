@@ -50,6 +50,8 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public final Property<Double> bottomInset = new Property<>(0.0);
     public final Property<Double> leftInset = new Property<>(0.0);
     public final Property<Double> rightInset = new Property<>(0.0);
+    /** Hardware screen corner radius in logical px. Android queries DisplayDeviceInfo/RoundedCorner. */
+    public final Property<Double> screenCornerRadius = new Property<>(0.0);
     /** Installed font families for the picker dialog. Not persisted. */
     public final Property<List<String>> availableFontFamilies =
             new Property<>(Collections.emptyList());
@@ -419,6 +421,11 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     @Override public boolean temperaImages() { return bool("temperaImages"); }
     @Override public int lyricFontSize() { return intOf("lyricFontSize"); }
     @Override public boolean lyricFullWidth() { return bool("lyricFullWidth"); }
+    @Override
+    public float screenCornerRadius() {
+        Double v = screenCornerRadius.peek();
+        return v != null ? v.floatValue() : 0f;
+    }
 
     @Override
     public float topInset() {
@@ -592,7 +599,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         }
     }
 
-    private void applyLanguage() {
+    public void applyLanguage() {
         int choice = intOf(SettingsCatalog.LANGUAGE_KEY);
         I18n.instance().setLanguage(
                 choice == SettingsCatalog.LANGUAGE_ZH_CN ? "zh_CN"
