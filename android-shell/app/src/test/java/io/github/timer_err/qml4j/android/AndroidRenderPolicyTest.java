@@ -95,6 +95,19 @@ public class AndroidRenderPolicyTest {
     }
 
     @Test
+    public void runningTimerInsideInvisibleItemStillWakesSurface() {
+        Item root = new Item();
+        Item hidden = new Item();
+        hidden.visible.set(false);
+        Timer timer = new Timer();
+        timer.running.set(true);
+        hidden.resources.add(timer);
+        root.children.add(hidden);
+
+        assertTrue(AndroidRenderPolicy.hasActiveQmlWork(root));
+    }
+
+    @Test
     public void wakeSettleAndSameFrameChangesKeepASecondFrameAlive() {
         Item root = new Item();
 

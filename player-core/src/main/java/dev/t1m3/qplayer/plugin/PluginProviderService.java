@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Validates JSON-like plugin responses and qualifies every native entity id. */
 public final class PluginProviderService {
@@ -36,6 +37,8 @@ public final class PluginProviderService {
     public static final int MAX_COVER_IMAGE_BYTES = 8 * 1024 * 1024;
     private final PluginManager manager;
     private final CorePluginHostApi hostApi;
+    private final ConcurrentHashMap<String, CompletableFuture<Playlist>> inFlightPlaylists =
+            new ConcurrentHashMap<>();
 
     public PluginProviderService(PluginManager manager, CorePluginHostApi hostApi) {
         this.manager = manager;
@@ -101,12 +104,16 @@ public final class PluginProviderService {
 
     public CompletableFuture<Playlist> playlist(MediaId id) {
         id.requireKind(MediaKind.PLAYLIST);
+        final String key = id.toString();
+        CompletableFuture<Playlist> existing = inFlightPlaylists.get(key);
+        if (existing != null) return existing;
         // A big playlist is the slowest thing a provider is asked for, and "it is
         // slow" can mean the service, the plugin's own JS, or this validation pass.
         // One line per open says which, without needing a profiler attached.
         final long startedAtNanos = System.nanoTime();
-        return manager.invoke(id.provider(), ProviderCapability.PLAYLIST_DETAILS.wireName(),
-                Collections.<String, Object>singletonMap("id", id.nativeId()))
+        CompletableFuture<Playlist> created = manager.invoke(
+                        id.provider(), ProviderCapability.PLAYLIST_DETAILS.wireName(),
+                        Collections.<String, Object>singletonMap("id", id.nativeId()))
                 .thenApply(raw -> {
                     long providerMs = (System.nanoTime() - startedAtNanos) / 1_000_000L;
                     long parseStartNanos = System.nanoTime();
@@ -116,6 +123,11 @@ public final class PluginProviderService {
                             (System.nanoTime() - parseStartNanos) / 1_000_000L);
                     return playlist;
                 });
+        CompletableFuture<Playlist> prior = inFlightPlaylists.putIfAbsent(key, created);
+        if (prior != null) return prior;
+        created.whenComplete((ignored, error) -> inFlightPlaylists.remove(key, created));
+        if (created.isDone()) inFlightPlaylists.remove(key, created);
+        return created;
     }
 
     public CompletableFuture<List<Song>> songsByIds(String provider, List<String> canonicalIds) {
@@ -591,9 +603,9 @@ public final class PluginProviderService {
                             "playlist.owner.name", false));
         }
         if (object.get("songs") instanceof List) {
-            playlist.songs.addAll(parseSongs(provider,
+            playlist.songs = parseSongs(provider,
                     boundedList(object.get("songs"), "playlist songs", 20_000),
-                    "playlist songs"));
+                    "playlist songs");
         }
         return playlist;
     }

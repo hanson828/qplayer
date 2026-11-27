@@ -368,12 +368,16 @@ Item {
                         coverUrl: modelData.coverUrl
                         coverThumbPath: modelData.coverThumbPath || ""
                         sourceName: modelData.sourceName || ""
+                        sharedMenu: searchPlaylistMenu
                         onClicked: {
                             page.pendingPlaylist = modelData
                             page.recordCurrentSearch()
                             page.openPlaylist()
                         }
                     }
+                }
+                PlaylistContextMenu {
+                    id: searchPlaylistMenu
                 }
             }
 

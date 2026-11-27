@@ -22,9 +22,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Owns enabled runtimes independently of any QML/render-thread lifecycle. */
 public final class PluginManager implements AutoCloseable {
@@ -51,18 +54,54 @@ public final class PluginManager implements AutoCloseable {
     }
 
     public synchronized void startEnabled() {
+        List<PluginRegistry.Entry> toStart = new ArrayList<>();
         for (PluginRegistry.Entry entry : registry.entries()) {
-            if (!entry.enabled || runtimes.containsKey(entry.id)) continue;
-            try { start(entry); }
-            catch (Exception error) {
-                Logger.warn("plugin {} failed integrity/startup checks and was disabled: {}",
-                        entry.id, error.getMessage());
-                try { registry.setEnabled(entry.id, false); }
-                catch (IOException saveError) {
-                    Logger.warn("plugin {} disabled state could not be saved: {}",
-                            entry.id, saveError.getMessage());
+            if (entry.enabled && !runtimes.containsKey(entry.id)) toStart.add(entry);
+        }
+        if (toStart.isEmpty()) return;
+        if (toStart.size() == 1) {
+            PluginRegistry.Entry entry = toStart.get(0);
+            try {
+                commitPrepared(prepareAndStart(entry));
+            } catch (Exception error) {
+                disableFailedEntry(entry, error);
+            }
+            return;
+        }
+        int poolSize = Math.min(toStart.size(), Math.max(2, Runtime.getRuntime().availableProcessors()));
+        AtomicInteger threadIndex = new AtomicInteger();
+        ExecutorService bootPool = Executors.newFixedThreadPool(poolSize, r -> {
+            Thread t = new Thread(r, "qplayer-plugin-boot-" + threadIndex.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            List<Future<PreparedRuntime>> futures = new ArrayList<>(toStart.size());
+            for (PluginRegistry.Entry entry : toStart) {
+                futures.add(bootPool.submit(() -> prepareAndStart(entry)));
+            }
+            for (int i = 0; i < toStart.size(); i++) {
+                PluginRegistry.Entry entry = toStart.get(i);
+                try {
+                    commitPrepared(futures.get(i).get());
+                } catch (Exception error) {
+                    Throwable cause = error instanceof java.util.concurrent.ExecutionException
+                            && error.getCause() != null ? error.getCause() : error;
+                    disableFailedEntry(entry, cause);
                 }
             }
+        } finally {
+            bootPool.shutdownNow();
+        }
+    }
+
+    private void disableFailedEntry(PluginRegistry.Entry entry, Throwable error) {
+        Logger.warn("plugin {} failed integrity/startup checks and was disabled: {}",
+                entry.id, error.getMessage());
+        try { registry.setEnabled(entry.id, false); }
+        catch (IOException saveError) {
+            Logger.warn("plugin {} disabled state could not be saved: {}",
+                    entry.id, saveError.getMessage());
         }
     }
 
@@ -233,7 +272,30 @@ public final class PluginManager implements AutoCloseable {
         return Collections.unmodifiableList(result);
     }
 
+    private static final class PreparedRuntime {
+        final PluginRegistry.Entry entry;
+        final PluginRuntime runtime;
+        final boolean hasBackgroundTick;
+
+        PreparedRuntime(PluginRegistry.Entry entry, PluginRuntime runtime, boolean hasBackgroundTick) {
+            this.entry = entry;
+            this.runtime = runtime;
+            this.hasBackgroundTick = hasBackgroundTick;
+        }
+    }
+
+    private void commitPrepared(PreparedRuntime prepared) {
+        runtimes.put(prepared.entry.id, prepared.runtime);
+        if (prepared.hasBackgroundTick) {
+            backgroundHandlers.add(prepared.entry.id);
+        }
+    }
+
     private void start(PluginRegistry.Entry entry) throws IOException {
+        commitPrepared(prepareAndStart(entry));
+    }
+
+    private PreparedRuntime prepareAndStart(PluginRegistry.Entry entry) throws IOException {
         Path root = pluginsRoot.resolve(entry.id).resolve(entry.activeVersion).normalize();
         if (!root.startsWith(pluginsRoot) || !Files.isDirectory(root)) {
             throw new IOException("active plugin files are missing");
@@ -251,27 +313,20 @@ public final class PluginManager implements AutoCloseable {
             throw new SecurityException("plugin requests permissions that were not granted");
         }
         if (hostApi instanceof PolicyAwarePluginHostApi) {
-            ((PolicyAwarePluginHostApi) hostApi).register(manifest);
+            synchronized (hostApi) {
+                ((PolicyAwarePluginHostApi) hostApi).register(manifest);
+            }
         }
         try {
             PluginRuntime runtime = PluginRuntime.start(root, manifest, hostApi);
-            runtimes.put(entry.id, runtime);
-            if (manifest.permissionSet().contains(PluginPermission.BACKGROUND_TIMERS)) {
-                try {
-                    if (runtime.hasHandler("backgroundTick").get(5, TimeUnit.SECONDS)) {
-                        backgroundHandlers.add(entry.id);
-                    }
-                } catch (Exception error) {
-                    throw new IOException("plugin background handler check failed", error);
-                }
-            }
+            boolean hasBg = manifest.permissionSet().contains(PluginPermission.BACKGROUND_TIMERS)
+                    && runtime.hasBackgroundTick();
+            return new PreparedRuntime(entry, runtime, hasBg);
         } catch (IOException | RuntimeException error) {
-            PluginRuntime failed = runtimes.remove(entry.id);
-            backgroundHandlers.remove(entry.id);
-            backgroundBusy.remove(entry.id);
-            if (failed != null) failed.close();
             if (hostApi instanceof PolicyAwarePluginHostApi) {
-                ((PolicyAwarePluginHostApi) hostApi).unregister(entry.id);
+                synchronized (hostApi) {
+                    ((PolicyAwarePluginHostApi) hostApi).unregister(entry.id);
+                }
             }
             throw error;
         }
@@ -318,7 +373,7 @@ public final class PluginManager implements AutoCloseable {
         try { digest = MessageDigest.getInstance("SHA-256"); }
         catch (GeneralSecurityException error) { throw new AssertionError(error); }
         try (InputStream input = Files.newInputStream(file)) {
-            byte[] buffer = new byte[8192];
+            byte[] buffer = new byte[65536];
             int count;
             while ((count = input.read(buffer)) >= 0) digest.update(buffer, 0, count);
         }

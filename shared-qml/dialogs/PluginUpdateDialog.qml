@@ -16,48 +16,58 @@ import miuix.Core
 Item {
     id: control
 
-    readonly property bool opened: dialog.opened
+    readonly property bool opened: dialogLoader.item ? dialogLoader.item.opened : false
+    property bool _loaded: player.pluginUpdateAvailable && !player.updateAvailable
 
-    function close() { dialog.close() }
+    function close() { if (dialogLoader.item) dialogLoader.item.close() }
 
     property bool appUpdateWatch: player.updateAvailable
     onAppUpdateWatchChanged: {
-        if (!player.updateAvailable || !dialog.opened) return
+        if (!player.updateAvailable || !control.opened) return
         // Step aside without consuming the offer -- the host proposes this same
         // plugin again once the app dialog closes.
         player.deferPluginUpdate()
-        dialog.close()
+        dialogLoader.item.close()
     }
     property int appUpdateRevWatch: player.updatePromptRevision
     onAppUpdateRevWatchChanged: {
-        if (!player.updateAvailable || !dialog.opened) return
+        if (!player.updateAvailable || !control.opened) return
         player.deferPluginUpdate()
-        dialog.close()
+        dialogLoader.item.close()
     }
 
     property bool pluginUpdateWatch: player.pluginUpdateAvailable
     onPluginUpdateWatchChanged: {
-        if (!player.pluginUpdateAvailable || dialog.opened) return
+        if (!player.pluginUpdateAvailable || control.opened) return
         if (player.updateAvailable) return
-        dialog.open()
+        control._loaded = true
+        if (dialogLoader.item) dialogLoader.item.open()
     }
 
-    Dialog {
+    Loader {
+        id: dialogLoader
+        anchors.fill: parent
+        active: control._loaded
+        onLoaded: if (item && player.pluginUpdateAvailable && !player.updateAvailable) item.open()
+        sourceComponent: Component {
+            Dialog {
 
-        topInset: settings.topInset
+                topInset: settings.topInset
 
-        bottomInset: settings.bottomInset
-        id: dialog
-        title: i18n.t("update.plugin.title")
-        icon: "extension"
-        text: i18n.t("update.plugin.body", player.pluginUpdateName,
-                     player.pluginUpdateVersion)
-              .replace("{2}", player.pluginUpdateInstalledVersion)
-        acceptText: i18n.t("update.now")
-        rejectText: i18n.t("update.later")
-        // Routes into the normal catalog install path, so the permission sheet
-        // still appears before the new version is activated.
-        onAccepted: player.installCatalogPlugin(player.pluginUpdateId)
-        onClosed: player.acknowledgePluginUpdate()
+                bottomInset: settings.bottomInset
+                id: dialog
+                title: i18n.t("update.plugin.title")
+                icon: "extension"
+                text: i18n.t("update.plugin.body", player.pluginUpdateName,
+                             player.pluginUpdateVersion)
+                      .replace("{2}", player.pluginUpdateInstalledVersion)
+                acceptText: i18n.t("update.now")
+                rejectText: i18n.t("update.later")
+                // Routes into the normal catalog install path, so the permission sheet
+                // still appears before the new version is activated.
+                onAccepted: player.installCatalogPlugin(player.pluginUpdateId)
+                onClosed: player.acknowledgePluginUpdate()
+            }
+        }
     }
 }

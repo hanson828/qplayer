@@ -37,6 +37,7 @@ Item {
     // Behavior: on this engine a Behavior on a binding-assigned property is
     // skipped, which is why an earlier version popped open with no motion.
     property real k: 0
+    property bool _everOpened: open
     readonly property bool active: sheet.open || sheet.k > 0.001
 
     visible: active
@@ -60,6 +61,7 @@ Item {
     }
     onOpenChanged: {
         if (sheet.open) {
+            sheet._everOpened = true
             slideOut.stop()
             slideIn.restart()
         } else {
@@ -102,17 +104,23 @@ Item {
         color: Ui.background
         clip: true
 
-        QueuePage {
-            objectName: "queueSheetPage"
-            x: 0
-            y: 0
-            width: parent.width
-            height: parent.height
-            // QueuePage holds its row delegates only while it is visible, so a
-            // closed sheet must not keep every SongRow in the queue alive.
-            visible: sheet.active
-            bottomContentInset: settings.bottomInset
-            onBack: sheet.dismissRequested()
+        Loader {
+            anchors.fill: parent
+            active: sheet._everOpened
+            sourceComponent: Component {
+                QueuePage {
+                    objectName: "queueSheetPage"
+                    x: 0
+                    y: 0
+                    width: parent.width
+                    height: parent.height
+                    // QueuePage holds its row delegates only while it is visible, so a
+                    // closed sheet must not keep every SongRow in the queue alive.
+                    visible: sheet.active
+                    bottomContentInset: settings.bottomInset
+                    onBack: sheet.dismissRequested()
+                }
+            }
         }
     }
 }

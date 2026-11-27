@@ -16,11 +16,20 @@ Menu {
     // three-entry menu.
     property bool deletable: false
     property bool subscribed: false
+    // Row or card currently owning a shared menu instance; null when standalone.
+    property var menuTarget: null
     signal openRequested()
     // Raised rather than acted on here: deleting needs a confirmation the page
     // owns, and a Dialog per card would instantiate one for every grid tile.
     signal deleteRequested()
     signal unsubscribeRequested()
+
+    onClosed: {
+        if (menu.menuTarget !== null) {
+            menu.menuTarget._menuArmed = false
+            menu.menuTarget = null
+        }
+    }
 
     function rebuild() {
         var pid = menu.playlistId
@@ -91,15 +100,24 @@ Menu {
     }
 
     function _openAction() {
-        return function() { menu.openRequested() }
+        return function() {
+            if (menu.menuTarget !== null) menu.menuTarget._triggerOpen()
+            else menu.openRequested()
+        }
     }
 
     function _deleteAction() {
-        return function() { menu.deleteRequested() }
+        return function() {
+            if (menu.menuTarget !== null) menu.menuTarget._triggerDelete()
+            else menu.deleteRequested()
+        }
     }
 
     function _unsubscribeAction() {
-        return function() { menu.unsubscribeRequested() }
+        return function() {
+            if (menu.menuTarget !== null) menu.menuTarget._triggerUnsubscribe()
+            else menu.unsubscribeRequested()
+        }
     }
 
     function _copyAction(pid) {

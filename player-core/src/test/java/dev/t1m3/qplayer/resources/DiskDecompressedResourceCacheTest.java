@@ -171,6 +171,38 @@ public class DiskDecompressedResourceCacheTest {
         }
     }
 
+    @Test
+    public void prewarmAsyncAndConcurrentLoadReuseBytesWithoutCorruption() throws Exception {
+        byte[] a = new byte[64 * 1024];
+        byte[] b = new byte[64 * 1024];
+        for (int i = 0; i < a.length; i++) {
+            a[i] = (byte) (i * 13);
+            b[i] = (byte) (i * 29 + 1);
+        }
+        byte[] aXz = xz(a);
+        byte[] bXz = xz(b);
+        io.github.timer_err.qml4j.render.ResourceLoader loader = source -> {
+            if ("fonts/A.otf.xz".equals(source)) return aXz;
+            if ("fonts/B.otf.xz".equals(source)) return bXz;
+            return null;
+        };
+        Path directory = temporaryFolder.getRoot().toPath();
+        DiskDecompressedResourceCache cache = new DiskDecompressedResourceCache(loader, directory);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            cache.prewarmAsync(pool, "fonts/A.otf", "fonts/B.otf");
+            java.util.concurrent.Future<byte[]> fA = pool.submit(() -> cache.load("fonts/A.otf"));
+            java.util.concurrent.Future<byte[]> fB = pool.submit(() -> cache.load("fonts/B.otf"));
+            assertArrayEquals(a, fA.get(10, java.util.concurrent.TimeUnit.SECONDS));
+            assertArrayEquals(b, fB.get(10, java.util.concurrent.TimeUnit.SECONDS));
+            cache.releasePrewarmed();
+            assertArrayEquals(a, cache.load("fonts/A.otf"));
+            assertArrayEquals(b, cache.load("fonts/B.otf"));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private static byte[] xz(byte[] input) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (XZOutputStream output = new XZOutputStream(bytes, new LZMA2Options())) {

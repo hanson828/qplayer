@@ -262,6 +262,7 @@ Flickable {
                 sourceName: modelData.sourceName || ""
                 deletable: !!modelData.deletable
                 subscribed: !!modelData.subscribed
+                sharedMenu: gridPlaylistMenu
                 onClicked: { grid.pendingPlaylist = modelData; grid.openPlaylist() }
                 onDeleteRequested: {
                     grid.pendingPlaylist = modelData
@@ -298,6 +299,10 @@ Flickable {
                 onReorderReleased: grid._endDrag()
                 onReorderCanceled: grid._cancelDrag()
             }
+        }
+
+        PlaylistContextMenu {
+            id: gridPlaylistMenu
         }
 
         // The carried card, lifted out of the grid. A separate item rather than

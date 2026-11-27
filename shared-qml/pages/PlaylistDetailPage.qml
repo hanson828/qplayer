@@ -159,7 +159,7 @@ Rectangle {
         // Fades in once the tracks arrive instead of popping over the spinner;
         // an in-place reload that keeps rows on screen does not blink.
         opacity: player.playlistLoading && (!page.filteredTracks || page.filteredTracks.length === 0) ? 0 : 1
-        Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
         rowInset: page.gutter
         scrollBarTopInset: Ui.headerHeight
         // The floating select bar covers the last rows otherwise.

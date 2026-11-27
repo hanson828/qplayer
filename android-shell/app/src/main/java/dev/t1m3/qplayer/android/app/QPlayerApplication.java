@@ -16,6 +16,10 @@ import dev.t1m3.qplayer.store.CredentialKeyProtection;
 import dev.t1m3.qplayer.android.resources.FileResourceLoader;
 import dev.t1m3.qplayer.resources.DiskDecompressedResourceCache;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * Installs a process-wide uncaught-exception handler whose only job is to
  * best-effort cancel the playback notification before the crash takes the
@@ -27,7 +31,25 @@ import dev.t1m3.qplayer.resources.DiskDecompressedResourceCache;
  */
 public final class QPlayerApplication extends Application {
 
+    private static final AtomicInteger STARTUP_THREAD_SEQ = new AtomicInteger();
+    private static final ExecutorService STARTUP_POOL = Executors.newFixedThreadPool(3, r -> {
+        Thread t = new Thread(r, "qplayer-boot-" + STARTUP_THREAD_SEQ.incrementAndGet());
+        t.setDaemon(true);
+        return t;
+    });
+    private static volatile long processCreateNanos;
+
     private DiskDecompressedResourceCache sceneResources;
+
+    /** Shared daemon executor used to parallelize cold-start I/O and library bring-up. */
+    public static ExecutorService startupExecutor() {
+        return STARTUP_POOL;
+    }
+
+    /** Process creation timestamp in {@link System#nanoTime()} units, for startup profiling. */
+    public static long processCreateNanos() {
+        return processCreateNanos;
+    }
 
     /** Assets and expanded fonts belong to the process, not to a recreated Activity. */
     public synchronized DiskDecompressedResourceCache sceneResources() {
@@ -41,11 +63,20 @@ public final class QPlayerApplication extends Application {
 
     @Override
     public void onCreate() {
+        processCreateNanos = System.nanoTime();
         super.onCreate();
         // Install credential protection at process start, before an Activity or a
         // restarted service can initialize the delayed credential-migration reader.
         AppDirs.setBase(getFilesDir().getAbsolutePath());
         CredentialKeyProtection.install(new AndroidKeystoreKeyProtector());
+
+        // Overlap native Skija JNI initialization and parallel UI font verification/
+        // decompression with Android's Activity creation and Binder IPC.
+        STARTUP_POOL.execute(SkijaLoader::ensureLoaded);
+        sceneResources().prewarmAsync(STARTUP_POOL,
+                "fonts/PingFangSC-Regular.otf",
+                "fonts/PingFangSC-Medium.otf",
+                "fonts/MaterialSymbolsRounded.ttf");
 
         final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
         Thread.setDefaultUncaughtExceptionHandler((thread, ex) -> {

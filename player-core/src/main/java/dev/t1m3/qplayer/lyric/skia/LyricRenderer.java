@@ -227,6 +227,10 @@ public class LyricRenderer {
     private Font layoutKeySubFont;
     private Font layoutKeyBgFont;
     private Font layoutKeyBgSubFont;
+    private float cachedLyricAscent;
+    private float cachedLyricDescent;
+    private float cachedBgAscent;
+    private float cachedBgDescent;
 
     private static Fonts.Weight toFontsWeight(LyricConfig.FontWeight w) {
         switch (w) {
@@ -406,6 +410,11 @@ public class LyricRenderer {
         return litBandResult;
     }
 
+    /** True while lines in the active layout still remain to be shaped. */
+    public boolean hasPendingLayout() {
+        return lineLayoutRemaining > 0;
+    }
+
     /** Prewarm layout and shape lines during idle frames before the lyrics sheet is opened. */
     public void prewarmLayout(float columnWidth, long positionMs, int budget) {
         final List<LyricLine> lines = this.lines;
@@ -501,6 +510,12 @@ public class LyricRenderer {
             layoutKeySubFont = subFont;
             layoutKeyBgFont = bgFont;
             layoutKeyBgSubFont = bgSubFont;
+            io.github.humbleui.skija.FontMetrics lm = lyricFont.getMetrics();
+            io.github.humbleui.skija.FontMetrics bm = bgFont.getMetrics();
+            cachedLyricAscent = lm.getAscent();
+            cachedLyricDescent = lm.getDescent();
+            cachedBgAscent = bm.getAscent();
+            cachedBgDescent = bm.getDescent();
         }
         if (lineLayoutRemaining > 0 && budget > 0) {
             int pivot = pivotLineIndex(positionMs, n);
@@ -575,13 +590,10 @@ public class LyricRenderer {
         int[][] rowStarts = cachedRowStarts;
         float[] lineHeights = cachedLineHeights;
 
-        // Font vertical metrics are invariant per (face,size) but Font.getMetrics()
-        // allocates a fresh FontMetrics on every call — pull them once per frame
-        // instead of per visible row.
-        float lyricDescent = lyricFont.getMetrics().getDescent();
-        float lyricAscent = lyricFont.getMetrics().getAscent();
-        float bgDescent = bgFont.getMetrics().getDescent();
-        float bgAscent = bgFont.getMetrics().getAscent();
+        float lyricDescent = cachedLyricDescent;
+        float lyricAscent = cachedLyricAscent;
+        float bgDescent = cachedBgDescent;
+        float bgAscent = cachedBgAscent;
 
         // ---- Layout. Every height below is either fully open or closed for this
         // frame; LyricColumnMotion turns each change into one spring motion per line.

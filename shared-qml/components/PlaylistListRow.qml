@@ -43,10 +43,24 @@ Rectangle {
     signal deleteRequested()
     signal unsubscribeRequested()
 
+    property var sharedMenu: null
+    readonly property var _menu: row.sharedMenu !== null ? row.sharedMenu : menuLoader.item
     property bool _menuArmed: false
+    property bool _pendingMenuOpen: false
+
+    function _triggerOpen() { row.activated() }
+    function _triggerDelete() { row.deleteRequested() }
+    function _triggerUnsubscribe() { row.unsubscribeRequested() }
+
     onPlaylistIdChanged: {
         row._menuArmed = false
-        if (menuLoader.item && menuLoader.item.opened) menuLoader.item.dismissImmediately()
+        row._pendingMenuOpen = false
+        if (row.sharedMenu !== null) {
+            if (row.sharedMenu.menuTarget === row && row.sharedMenu.opened)
+                row.sharedMenu.dismissImmediately()
+        } else if (menuLoader.item && menuLoader.item.opened) {
+            menuLoader.item.dismissImmediately()
+        }
     }
 
     scale: row.dragging ? 1.03 : 1.0
@@ -164,21 +178,42 @@ Rectangle {
 
     Loader {
         id: menuLoader
-        active: true
-        sourceComponent: PlaylistContextMenu {
-            playlistId: row.playlistId
-            deletable: row.deletable
-            subscribed: row.subscribed
-            onOpenRequested: row.activated()
-            onDeleteRequested: row.deleteRequested()
-            onUnsubscribeRequested: row.unsubscribeRequested()
-            onClosed: row._menuArmed = false
+        active: false
+        onLoaded: {
+            if (item && row._pendingMenuOpen) {
+                row._pendingMenuOpen = false
+                item.rebuild()
+                item.open(overflowButton, 0, overflowButton.height)
+            }
+        }
+        sourceComponent: Component {
+            PlaylistContextMenu {
+                playlistId: row.playlistId
+                deletable: row.deletable
+                subscribed: row.subscribed
+                onOpenRequested: row.activated()
+                onDeleteRequested: row.deleteRequested()
+                onUnsubscribeRequested: row.unsubscribeRequested()
+                onClosed: row._menuArmed = false
+            }
         }
     }
     function _openMenu() {
-        if (menuLoader.item === null) return
-        menuLoader.item.rebuild()
-        menuLoader.item.open(overflowButton, 0, overflowButton.height)
+        var m = row._menu
+        if (m !== null) {
+            if (row.sharedMenu !== null) {
+                if (m.opened) m.dismissImmediately()
+                m.menuTarget = row
+                m.playlistId = row.playlistId
+                m.deletable = row.deletable
+                m.subscribed = row.subscribed
+            }
+            m.rebuild()
+            m.open(overflowButton, 0, overflowButton.height)
+            return
+        }
+        row._pendingMenuOpen = true
+        menuLoader.active = true
     }
 
     // Always available, regardless of reorderable/revealed state: long-press is

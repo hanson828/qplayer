@@ -209,6 +209,44 @@ public class PluginPackageVerifierTest {
         }
     }
 
+    @Test
+    public void startsMultiplePluginsInParallelAndDisablesOnlyFailures() throws Exception {
+        KeyPair keys = keys();
+        PluginPackageVerifier verifier = new PluginPackageVerifier();
+        VerifiedPluginPackage alpha = verifier.verify(
+                packageFile("alpha.qplug", keys, "module.exports={handlers:{}};", false, "1.0.0", "alpha"),
+                keys.getPublic(), false);
+        VerifiedPluginPackage beta = verifier.verify(
+                packageFile("beta.qplug", keys, "module.exports={handlers:{}};", false, "1.0.0", "beta"),
+                keys.getPublic(), false);
+        VerifiedPluginPackage gamma = verifier.verify(
+                packageFile("gamma.qplug", keys, "module.exports={handlers:{}};", false, "1.0.0", "gamma"),
+                keys.getPublic(), false);
+        Path installRoot = temporary.newFolder("parallel-plugins").toPath();
+        PluginRegistry registry = new PluginRegistry(
+                temporary.getRoot().toPath().resolve("parallel-plugins.json"));
+        PluginInstaller installer = new PluginInstaller(installRoot, registry);
+        installer.install(alpha, Collections.<PluginPermission>emptySet());
+        installer.install(beta, Collections.<PluginPermission>emptySet());
+        installer.install(gamma, Collections.<PluginPermission>emptySet());
+        // Corrupt beta after install; alpha and gamma must still start cleanly.
+        Files.write(installRoot.resolve("beta/1.0.0/main.js"),
+                "tampered".getBytes(StandardCharsets.UTF_8));
+
+        PluginHostApi host = (pluginId, method, arguments) ->
+                java.util.concurrent.CompletableFuture.completedFuture(null);
+        try (PluginManager manager = new PluginManager(installRoot, registry, host)) {
+            manager.startEnabled();
+            java.util.List<PluginManifest> providers = manager.enabledProviders();
+            assertEquals(2, providers.size());
+            assertEquals("alpha", providers.get(0).id);
+            assertEquals("gamma", providers.get(1).id);
+            assertTrue(registry.get("alpha").enabled);
+            assertFalse(registry.get("beta").enabled);
+            assertTrue(registry.get("gamma").enabled);
+        }
+    }
+
     private Path packageFile(String name, KeyPair keys, String script) throws Exception {
         return packageFile(name, keys, script, false);
     }
@@ -224,10 +262,15 @@ public class PluginPackageVerifierTest {
 
     private Path packageFile(String name, KeyPair keys, String script, boolean tamper,
                              String version) throws Exception {
+        return packageFile(name, keys, script, tamper, version, "fixture");
+    }
+
+    private Path packageFile(String name, KeyPair keys, String script, boolean tamper,
+                             String version, String id) throws Exception {
         PluginManifest manifest = new PluginManifest();
         manifest.schemaVersion = 1;
-        manifest.id = "fixture";
-        manifest.name = "Fixture";
+        manifest.id = id;
+        manifest.name = "Fixture " + id;
         manifest.version = version;
         manifest.apiVersion = "1.0";
         byte[] manifestBytes = new Gson().toJson(manifest).getBytes(StandardCharsets.UTF_8);

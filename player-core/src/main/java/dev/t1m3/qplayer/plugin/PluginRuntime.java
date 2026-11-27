@@ -61,6 +61,7 @@ public final class PluginRuntime implements AutoCloseable {
     private final SandboxContextFactory contexts = new SandboxContextFactory();
     private final Map<String, Scriptable> modules = new LinkedHashMap<>();
     private volatile boolean closed;
+    private volatile boolean backgroundTickAvailable;
     private Scriptable scope;
     private Scriptable handlers;
     private Scriptable registered;
@@ -92,6 +93,8 @@ public final class PluginRuntime implements AutoCloseable {
     }
 
     public PluginManifest manifest() { return manifest; }
+
+    public boolean hasBackgroundTick() { return backgroundTickAvailable; }
 
     public CompletableFuture<Boolean> hasHandler(String name) {
         return submit(() -> handler(name) != null);
@@ -156,6 +159,7 @@ public final class PluginRuntime implements AutoCloseable {
                 throw new PluginExecutionException("plugin entry must export { handlers: {...} }");
             }
             handlers = (Scriptable) rawHandlers;
+            backgroundTickAvailable = handler("backgroundTick") != null;
             for (ProviderCapability capability : manifest.capabilitySet()) {
                 if (handler(capability.wireName()) == null) {
                     throw new PluginExecutionException("plugin advertises but does not implement "

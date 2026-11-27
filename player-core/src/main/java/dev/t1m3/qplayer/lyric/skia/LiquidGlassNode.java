@@ -33,6 +33,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * Live, local-GPU implementation of miuix's liquid navigation and floating surfaces.
@@ -111,6 +112,8 @@ public final class LiquidGlassNode extends SkijaItem {
     private float sourceLayoutWidth = -1;
     private long normalStructure = -1;
     private long accentStructure = -1;
+    private Object lastSurfaceColorRaw;
+    private int cachedSurfaceColor;
 
     @SuppressWarnings("unchecked")
     public LiquidGlassNode(Item marker, Renderer renderer, boolean navigation) {
@@ -187,7 +190,12 @@ public final class LiquidGlassNode extends SkijaItem {
             float rho = (float) Math.hypot(m[0], m[3]);
             if (!(rho > 0)) return;
             ensureResources(owner, width, height, rho);
-            int surfaceColor = Renderer.parseColor(String.valueOf(colorProperty.peek()));
+            Object rawColor = colorProperty.peek();
+            if (rawColor != lastSurfaceColorRaw && !Objects.equals(rawColor, lastSurfaceColorRaw)) {
+                lastSurfaceColorRaw = rawColor;
+                cachedSurfaceColor = Renderer.parseColor(String.valueOf(rawColor));
+            }
+            int surfaceColor = cachedSurfaceColor;
             boolean dark = Boolean.TRUE.equals(darkProperty.peek());
             if (!navigation) {
                 capture(owner, transform, width, height);

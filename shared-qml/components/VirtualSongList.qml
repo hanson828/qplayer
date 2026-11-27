@@ -52,13 +52,22 @@ Flickable {
     property bool queueList: false
     property bool selectMode: false
     property string selectedKey: ""
-    readonly property int selectedN: {
-        if (view.selectedKey === "") return 0
-        var n = 0
-        var parts = view.selectedKey.split("\n")
-        for (var i = 0; i < parts.length; i++) if (parts[i] !== "") n++
-        return n
+    readonly property var _selectedState: {
+        var map = {}
+        var count = 0
+        if (view.selectedKey !== "") {
+            var parts = view.selectedKey.split("\n")
+            for (var i = 0; i < parts.length; i++) {
+                var p = parts[i]
+                if (p !== "" && !map[p]) {
+                    map[p] = true
+                    count++
+                }
+            }
+        }
+        return { map: map, count: count }
     }
+    readonly property int selectedN: view._selectedState.count
     // True only when every selected row is one of the account's liked songs:
     // the batch "unlike" action is offered for that selection alone. Same row id
     // the per-row heart uses; likedRevision makes the liked set observable.
@@ -265,8 +274,7 @@ Flickable {
     }
     function rowSelected(item) {
         var id = view.rowId(item)
-        if (!id || view.selectedKey === "") return false
-        return ("\n" + view.selectedKey + "\n").indexOf("\n" + id + "\n") >= 0
+        return !!(id && view._selectedState.map[id])
     }
     function toggleSelected(item) {
         var id = view.rowId(item)
@@ -294,11 +302,7 @@ Flickable {
     }
     function clearSelection() { view.selectedKey = "" }
     function selectedCount() {
-        if (view.selectedKey === "") return 0
-        var n = 0
-        var parts = view.selectedKey.split("\n")
-        for (var i = 0; i < parts.length; i++) if (parts[i] !== "") n++
-        return n
+        return view._selectedState.count
     }
     signal loadMoreRequested()
 
@@ -409,9 +413,7 @@ Flickable {
                 inQueue: view.queueList
                 sharedMenu: songMenuShared
                 selectMode: view.selectMode
-                selected: view.selectMode && view.selectedKey !== ""
-                          && (("\n" + view.selectedKey + "\n").indexOf(
-                              "\n" + view.rowId(modelData) + "\n") >= 0)
+                selected: view.selectMode && !!view._selectedState.map[view.rowId(modelData)]
                 onSelectionToggled: view.toggleSelected(modelData)
                 onActivated: { view.activatedIndex = index; view.activated() }
                 onRemoveRequested: { view.removeIndex = index; view.removeRequested() }

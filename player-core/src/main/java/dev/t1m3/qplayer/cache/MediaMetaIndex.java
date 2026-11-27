@@ -20,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 /** Source-qualified metadata for offline audio files and offline search. */
 public final class MediaMetaIndex {
@@ -36,6 +38,22 @@ public final class MediaMetaIndex {
                 }
             });
     private volatile boolean dirty;
+    private volatile boolean loaded;
+    private volatile CompletableFuture<Void> loadFuture;
+
+    /** Start loading on {@code executor}; callers block on {@link #ensureLoaded()} if needed. */
+    public CompletableFuture<Void> loadAsync(Executor executor) {
+        if (loaded) return CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> future = CompletableFuture.runAsync(this::load, executor);
+        loadFuture = future;
+        return future;
+    }
+
+    private void ensureLoaded() {
+        if (loaded) return;
+        CompletableFuture<Void> pending = loadFuture;
+        if (pending != null) pending.join();
+    }
 
     public void load() {
         try {
@@ -51,6 +69,8 @@ public final class MediaMetaIndex {
             migrateLegacy();
         } catch (Throwable error) {
             Logger.warn("MediaMetaIndex load failed: {}", error.getMessage());
+        } finally {
+            loaded = true;
         }
     }
 
@@ -73,9 +93,9 @@ public final class MediaMetaIndex {
                 track.album = song.album;
                 track.coverUrl = song.coverUrl;
                 track.durationMs = song.durationMs;
-                upsert(track);
+                upsertInternal(track);
             }
-            save();
+            saveInternal();
             // Deliberately retain the v1 file for one rollback-compatible release.
         } catch (Throwable error) {
             Logger.warn("legacy song metadata migration failed: {}", error.getMessage());
@@ -83,6 +103,11 @@ public final class MediaMetaIndex {
     }
 
     public void upsert(Track track) {
+        ensureLoaded();
+        upsertInternal(track);
+    }
+
+    private void upsertInternal(Track track) {
         if (track == null) return;
         String id = track.canonicalId();
         if (id.isEmpty() || track.title == null || track.title.isEmpty()) return;
@@ -116,6 +141,7 @@ public final class MediaMetaIndex {
     }
 
     public List<Track> search(String keywordLower, int limit) {
+        ensureLoaded();
         String query = keywordLower != null ? keywordLower.toLowerCase(Locale.ROOT) : "";
         if (query.isEmpty()) return Collections.emptyList();
         List<Entry> values;
@@ -132,6 +158,7 @@ public final class MediaMetaIndex {
     }
 
     public List<Track> all() {
+        ensureLoaded();
         List<Entry> values;
         synchronized (byId) { values = new ArrayList<>(byId.values()); }
         Collections.reverse(values);
@@ -147,7 +174,12 @@ public final class MediaMetaIndex {
      *  own write — making the second's save() return early and drop that entry until
      *  some later upsert happened to set the flag again. Claiming the flag under the
      *  lock alongside the snapshot keeps the two in step. */
-    public synchronized void save() {
+    public void save() {
+        ensureLoaded();
+        saveInternal();
+    }
+
+    private synchronized void saveInternal() {
         List<Entry> items;
         synchronized (byId) {
             if (!dirty) return;

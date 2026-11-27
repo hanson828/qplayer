@@ -188,6 +188,9 @@ public final class PlayerController {
      *  is just down) — DiskCache itself only knows bare ids, no display text. */
     private final MediaMetaIndex mediaMetaIndex = new MediaMetaIndex();
     private final MediaPlaylistCacheIndex mediaPlaylistCacheIndex = new MediaPlaylistCacheIndex();
+    private static final long PLAYLIST_FRESH_TTL_MS = 45_000L;
+    private final Map<String, Long> playlistFreshAtMs =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** Source runtimes outlive the QML renderer and remain active in the tray/background. */
     private final PluginRegistry pluginRegistry = new PluginRegistry();
     private final CorePluginHostApi pluginHostApi = new CorePluginHostApi();
@@ -979,8 +982,8 @@ public final class PlayerController {
 
             worker.submit(this::loadSearchHistory);
             loadLyricOffsets();
-            mediaMetaIndex.load();
-            mediaPlaylistCacheIndex.load();
+            mediaMetaIndex.loadAsync(ioWorker);
+            mediaPlaylistCacheIndex.loadAsync(worker);
 
             diskCache.loadActivelyCached();
             pluginManager.startEnabled();
@@ -3271,6 +3274,16 @@ public final class PlayerController {
         }
     }
 
+    /** True while a play/pause/track-end volume fade is in progress. */
+    public boolean isFadeActive() {
+        return isFadeRunning();
+    }
+
+    /** Milliseconds until the next throttled position push on idle non-lyric screens. */
+    public long msUntilNextPositionPush() {
+        return Math.max(0L, 200L - (System.currentTimeMillis() - lastPositionPush));
+    }
+
     /** Notice when the current track enters its natural end window. The render pump
      *  only detects this boundary; once started, the independent fade clock above
      *  always carries the ramp to its exact target. */
@@ -4389,19 +4402,24 @@ public final class PlayerController {
         localPlaylistReorderable.set(LocalPlaylist.SORT_CUSTOM.equals(playlist.sortField));
         List<PlaylistTrack> ordered = playlist.sortedTracks();
         List<Track> rows = new ArrayList<>(ordered.size());
+        Map<String, Track> localByPath = null;
         for (PlaylistTrack stored : ordered) {
             Track track = stored.toTrack();
             if (track.source != Track.Source.LOCAL) {
                 track.coverThumbPath = trackCoverUrl(track, "128");
-            } else {
+            } else if (!library.isEmpty() && track.filePath != null) {
                 // A local song's own cached thumbnail lives in the library, not in
                 // the playlist record; recover it so rows aren't blank after restart.
-                for (Track known : library) {
-                    if (known.filePath != null && known.filePath.equals(track.filePath)) {
-                        track.coverThumbPath = known.coverThumbPath;
-                        track.coverLocalPath = known.coverLocalPath;
-                        break;
+                if (localByPath == null) {
+                    localByPath = new HashMap<>(library.size() * 2);
+                    for (Track known : library) {
+                        if (known.filePath != null) localByPath.putIfAbsent(known.filePath, known);
                     }
+                }
+                Track known = localByPath.get(track.filePath);
+                if (known != null) {
+                    track.coverThumbPath = known.coverThumbPath;
+                    track.coverLocalPath = known.coverLocalPath;
                 }
             }
             rows.add(track);
@@ -8581,9 +8599,78 @@ public final class PlayerController {
         synchronized (QmlRuntimeLock.MONITOR) {
             if (Boolean.TRUE.equals(playlistLoading.peek())) return;
             String mediaId = openSourcePlaylistId.peek();
-            if (mediaId != null && !mediaId.isEmpty()) loadMediaPlaylist(mediaId, true);
-            else if (currentPlaylistId > 0) openPlaylist(currentPlaylistId);
+            if (mediaId != null && !mediaId.isEmpty()) {
+                invalidatePlaylistFreshness(mediaId);
+                loadMediaPlaylist(mediaId, true);
+            } else if (currentPlaylistId > 0) {
+                invalidatePlaylistFreshness("netease:playlist:" + currentPlaylistId);
+                openPlaylist(currentPlaylistId);
+            }
         }
+    }
+
+    private void invalidatePlaylistFreshness(String playlistMediaId) {
+        if (playlistMediaId != null && !playlistMediaId.isEmpty()) {
+            playlistFreshAtMs.remove(playlistMediaId);
+        }
+    }
+
+    private Playlist findKnownPlaylistSummary(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty()) return null;
+        for (List<Playlist> slice : myPlaylistsBySource.values()) {
+            if (slice == null) continue;
+            for (Playlist candidate : slice) {
+                if (candidate != null && mediaId.equals(candidate.id)) return candidate;
+            }
+        }
+        List<Playlist> rec = sourceRecommendPlaylists.peek();
+        if (rec != null) {
+            for (Playlist candidate : rec) {
+                if (candidate != null && mediaId.equals(candidate.id)) return candidate;
+            }
+        }
+        List<Playlist> sections = sourceSectionPlaylists.peek();
+        if (sections != null) {
+            for (Playlist candidate : sections) {
+                if (candidate != null && mediaId.equals(candidate.id)) return candidate;
+            }
+        }
+        return null;
+    }
+
+    private void applyPlaylistMetadata(MediaId id, Playlist resolved, boolean offline) {
+        playlistTitle.set(resolved.name);
+        playlistCoverPath.set(resolved.artworkUrl);
+        playlistSubscribed.set(resolved.subscribed);
+        playlistOwned.set(resolved.owned);
+        playlistDeletable.set(resolved.deletable);
+        // Dragging is offered only on a playlist that is both the user's own and
+        // whose source can save an order. An offline snapshot is read-only too:
+        // there is nowhere to send the new arrangement.
+        sourcePlaylistReorderable.set(resolved.owned
+                && !offline
+                && pluginHasCapability(id.provider(), ProviderCapability.PLAYLIST_REORDER));
+    }
+
+    private static boolean samePlaylistTrackList(List<Song> current, List<Song> next) {
+        if (current == next) return true;
+        if (current == null || next == null) return false;
+        int n = current.size();
+        if (n != next.size()) return false;
+        for (int i = 0; i < n; i++) {
+            Song a = current.get(i);
+            Song b = next.get(i);
+            if (a == b) continue;
+            if (a == null || b == null) return false;
+            if (!Objects.equals(a.id, b.id)
+                    || !Objects.equals(a.title, b.title)
+                    || !Objects.equals(a.coverThumbPath, b.coverThumbPath)
+                    || a.playable != b.playable
+                    || a.restricted != b.restricted) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void loadMediaPlaylist(String mediaId, boolean refreshing) {
@@ -8595,9 +8682,10 @@ public final class PlayerController {
         final MediaId id;
         try { id = MediaId.parse(mediaId).requireKind(dev.t1m3.qplayer.media.MediaKind.PLAYLIST); }
         catch (IllegalArgumentException error) { showToast(I18n.tr("toast.id.playlist")); return; }
+        final String idKey = id.toString();
         currentPlaylistId = 0L;
         openPlaylistId.set(0L);
-        openSourcePlaylistId.set(id.toString());
+        openSourcePlaylistId.set(idKey);
         // Capabilities belong to the playlist's own source, not to whichever source
         // happens to be primary: an open QQ playlist must not offer NetEase's
         // heart-recommendation button (and vice versa).
@@ -8605,48 +8693,62 @@ public final class PlayerController {
                 pluginHasCapability(id.provider(), ProviderCapability.HEART_RECOMMENDATION));
         sourcePlaylistCoverAvailable.set(
                 pluginHasCapability(id.provider(), ProviderCapability.PLAYLIST_COVER));
-        playlistLoading.set(true);
-        playlistOffline.set(false);
-        sourcePlaylistReorderable.set(false);
-        if (!refreshing) {
+
+        Playlist cached = !refreshing ? mediaPlaylistCacheIndex.getIfLoaded(idKey) : null;
+        final boolean shownCached = cached != null && cached.songs != null && !cached.songs.isEmpty();
+        if (shownCached) {
+            playlistLoading.set(false);
+            playlistOffline.set(false);
             playlistTracks.set(Collections.<NeteaseSong>emptyList());
-            sourcePlaylistTracks.set(Collections.<Song>emptyList());
-            playlistTitle.set("");
-            playlistCoverPath.set("");
-            playlistSubscribed.set(false);
-            playlistOwned.set(false);
-            playlistDeletable.set(false);
+            applyPlaylistMetadata(id, cached, false);
+            sourcePlaylistTracks.set(Collections.unmodifiableList(new ArrayList<>(cached.songs)));
+            Long freshAt = playlistFreshAtMs.get(idKey);
+            if (freshAt != null && (System.currentTimeMillis() - freshAt) < PLAYLIST_FRESH_TTL_MS) {
+                return;
+            }
+        } else {
+            playlistLoading.set(true);
+            playlistOffline.set(false);
+            sourcePlaylistReorderable.set(false);
+            if (!refreshing) {
+                playlistTracks.set(Collections.<NeteaseSong>emptyList());
+                sourcePlaylistTracks.set(Collections.<Song>emptyList());
+                Playlist summary = findKnownPlaylistSummary(idKey);
+                playlistTitle.set(summary != null ? summary.name : "");
+                playlistCoverPath.set(summary != null ? summary.artworkUrl : "");
+                playlistSubscribed.set(summary != null && summary.subscribed);
+                playlistOwned.set(summary != null && summary.owned);
+                playlistDeletable.set(summary != null && summary.deletable);
+            }
         }
+
         pluginProviders.playlist(id).whenComplete((playlist, error) -> post(() -> {
-            if (!id.toString().equals(openSourcePlaylistId.peek())) return;
+            if (!idKey.equals(openSourcePlaylistId.peek())) return;
             playlistLoading.set(false);
             Playlist resolved = playlist;
             if (error != null || resolved == null) {
                 Logger.warn("plugin playlist {} failed: {}", id, safeMessage(error));
-                resolved = mediaPlaylistCacheIndex.get(id.toString());
+                if (shownCached) {
+                    playlistOffline.set(true);
+                    sourcePlaylistReorderable.set(false);
+                    return;
+                }
+                resolved = mediaPlaylistCacheIndex.get(idKey);
                 if (resolved == null) {
                     showToast(I18n.tr("toast.playlist.loadFailedPlugin"));
                     return;
                 }
                 playlistOffline.set(true);
+            } else {
+                playlistFreshAtMs.put(idKey, System.currentTimeMillis());
+                playlistOffline.set(false);
             }
             long publishStartNanos = System.nanoTime();
-            playlistTitle.set(resolved.name);
-            playlistCoverPath.set(resolved.artworkUrl);
-            playlistSubscribed.set(resolved.subscribed);
-            playlistOwned.set(resolved.owned);
-            playlistDeletable.set(resolved.deletable);
-            // Dragging is offered only on a playlist that is both the user's own and
-            // whose source can save an order. An offline snapshot is read-only too:
-            // there is nowhere to send the new arrangement.
-            sourcePlaylistReorderable.set(resolved.owned
-                    && !Boolean.TRUE.equals(playlistOffline.peek())
-                    && pluginHasCapability(id.provider(), ProviderCapability.PLAYLIST_REORDER));
-            sourcePlaylistTracks.set(Collections.unmodifiableList(
-                    new ArrayList<>(resolved.songs)));
-            // Snapshotting the playlist costs a full JSON round trip of every track
-            // — measured at 30-70 ms for a thousand-track list — which has no
-            // business running on the render thread while the rows are appearing.
+            applyPlaylistMetadata(id, resolved, Boolean.TRUE.equals(playlistOffline.peek()));
+            if (!shownCached || !samePlaylistTrackList(sourcePlaylistTracks.peek(), resolved.songs)) {
+                sourcePlaylistTracks.set(Collections.unmodifiableList(
+                        new ArrayList<>(resolved.songs)));
+            }
             final Playlist snapshot = resolved;
             worker.submit(() -> {
                 mediaPlaylistCacheIndex.upsert(snapshot);
@@ -8722,6 +8824,7 @@ public final class PlayerController {
                                                                         openSourcePlaylistId
                                                                                 .peek());
                                                 if (error == null && Boolean.TRUE.equals(success)) {
+                                                    invalidatePlaylistFreshness(id.toString());
                                                     showToast(
                                                             I18n.tr(
                                                                     subscribed
@@ -9100,6 +9203,7 @@ public final class PlayerController {
                                 post(
                                         () -> {
                                             if (error == null && Boolean.TRUE.equals(success)) {
+                                                invalidatePlaylistFreshness(id.toString());
                                                 showToast(I18n.tr("toast.cover.updated"));
                                                 // refreshPlaylist(), not openMediaPlaylist(): the
                                                 // user is
@@ -9173,6 +9277,7 @@ public final class PlayerController {
         synchronized (QmlRuntimeLock.MONITOR) {
             if (playlistKey == null || playlistKey.trim().isEmpty()) return;
             final String key = playlistKey.trim();
+            invalidatePlaylistFreshness(key);
             CoverPicker p = coverPicker;
             if (p != null) onHost(() -> p.pick(key));
         }
@@ -9202,6 +9307,7 @@ public final class PlayerController {
                                     post(
                                             () -> {
                                                 if (error == null && Boolean.TRUE.equals(success)) {
+                                                    invalidatePlaylistFreshness(id.toString());
                                                     showToast(I18n.tr("toast.playlist.deleted"));
                                                     loadMyPlaylists();
                                                 } else
@@ -9432,6 +9538,7 @@ public final class PlayerController {
                                 post(
                                         () -> {
                                             if (error == null && Boolean.TRUE.equals(success)) {
+                                                invalidatePlaylistFreshness(playlistId.toString());
                                                 showToast(
                                                         I18n.tr(
                                                                 add
@@ -9480,6 +9587,7 @@ public final class PlayerController {
         if (remaining.size() == current.size()) return;
         sourcePlaylistTracks.set(Collections.unmodifiableList(remaining));
         final String playlistId = openSourcePlaylistId.peek();
+        invalidatePlaylistFreshness(playlistId);
         final Set<String> gone = new HashSet<>(songMediaIds);
         worker.submit(() -> {
             Playlist cached = mediaPlaylistCacheIndex.get(playlistId);
@@ -9515,6 +9623,7 @@ public final class PlayerController {
             if (from == to) return;
             List<Song> reordered = new ArrayList<>(current);
             reordered.add(to, reordered.remove(from));
+            invalidatePlaylistFreshness(openSourcePlaylistId.peek());
             sourcePlaylistTracks.set(Collections.unmodifiableList(reordered));
         }
     }
@@ -9570,6 +9679,7 @@ public final class PlayerController {
                                                                         openSourcePlaylistId
                                                                                 .peek());
                                                 if (error == null && Boolean.TRUE.equals(success)) {
+                                                    invalidatePlaylistFreshness(playlistId.toString());
                                                     if (sourceOrderPending && stillOpen) {
                                                         sourceOrderPending = false;
                                                         commitSourcePlaylistOrder();

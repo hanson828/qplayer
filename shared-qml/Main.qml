@@ -567,12 +567,15 @@ Rectangle {
     property int prewarmStep: 0
     Timer {
         id: prewarmTimer
-        interval: 260
+        interval: 380
         repeat: true
         running: false
         onTriggered: {
             if (rootPageMotion.isRunning() || app.pageTransitionActive
                     || app.pendingLoadIndex >= 0
+                    || app.queueSheetOpen || app.loginOpen
+                    || app.volumeOpen || app.sleepTimerOpen
+                    || player.temperaOpen
                     || player.lyricsOpen || player.lyricSlide > 0.001)
                 return
             app.prewarmStep = app.prewarmStep + 1
@@ -608,7 +611,7 @@ Rectangle {
     // start already stalls ~740 ms on GC and JIT).
     Timer {
         id: prewarmKick
-        interval: 900
+        interval: 1500
         repeat: false
         running: true
         onTriggered: prewarmTimer.start()

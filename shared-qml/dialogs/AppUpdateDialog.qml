@@ -13,50 +13,64 @@ import design
 Item {
     id: control
 
-    readonly property bool opened: dialog.opened
+    readonly property bool opened: dialogLoader.item ? dialogLoader.item.opened : false
+    property bool _loaded: player.updateAvailable
 
     // Watch the revision, not just updateAvailable: qml4j does not notify when
     // a Property is set to its current value, so a dismissed dialog would never
     // reopen from Settings > 检查更新 if we only watched the boolean.
     property int updateWatch: player.updatePromptRevision
-    onUpdateWatchChanged: if (player.updateAvailable) dialog.open()
+    onUpdateWatchChanged: {
+        if (player.updateAvailable) {
+            control._loaded = true
+            if (dialogLoader.item) dialogLoader.item.open()
+        }
+    }
 
-    Dialog {
-        id: dialog
-        objectName: "appUpdateDialog"
-        topInset: settings.topInset
-        bottomInset: settings.bottomInset
-        title: i18n.t("update.app.title")
-        icon: "system_update"
-        text: i18n.t("update.app.body", player.updateVersion)
-        acceptText: i18n.t("update.now")
-        rejectText: i18n.t("update.later")
-        onAccepted: player.startUpdateDownload()
-        // Releases the host's hold on the plugin-update prompt: only one update
-        // dialog is ever on screen, and the app's own goes first.
-        onClosed: player.appUpdatePromptClosed()
+    Loader {
+        id: dialogLoader
+        anchors.fill: parent
+        active: control._loaded
+        onLoaded: if (item && player.updateAvailable) item.open()
+        sourceComponent: Component {
+            Dialog {
+                id: dialog
+                objectName: "appUpdateDialog"
+                topInset: settings.topInset
+                bottomInset: settings.bottomInset
+                title: i18n.t("update.app.title")
+                icon: "system_update"
+                text: i18n.t("update.app.body", player.updateVersion)
+                acceptText: i18n.t("update.now")
+                rejectText: i18n.t("update.later")
+                onAccepted: player.startUpdateDownload()
+                // Releases the host's hold on the plugin-update prompt: only one update
+                // dialog is ever on screen, and the app's own goes first.
+                onClosed: player.appUpdatePromptClosed()
 
-        // Release notes on a sunken panel. No Flickable of its own: Dialog scrolls
-        // its body once the notes push it past the screen, and a nested scroller
-        // would just fight that one for the drag.
-        Item {
-            width: dialog.contentWidth
-            height: player.updateNotes.length > 0 ? notes.implicitHeight + Ui.space8 : 0
-            visible: player.updateNotes.length > 0
-            Rectangle {
-                anchors.fill: parent
-                radius: Ui.radiusMd
-                color: Ui.surfaceRaised
-            }
-            Text {
-                id: notes
-                x: Ui.space4
-                y: Ui.space4
-                width: Math.max(0, parent.width - Ui.space8)
-                text: player.updateNotes
-                color: Ui.textSecondary
-                wrapMode: Text.Wrap
-                font.pixelSize: Ui.textCallout
+                // Release notes on a sunken panel. No Flickable of its own: Dialog scrolls
+                // its body once the notes push it past the screen, and a nested scroller
+                // would just fight that one for the drag.
+                Item {
+                    width: dialog.contentWidth
+                    height: player.updateNotes.length > 0 ? notes.implicitHeight + Ui.space8 : 0
+                    visible: player.updateNotes.length > 0
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Ui.radiusMd
+                        color: Ui.surfaceRaised
+                    }
+                    Text {
+                        id: notes
+                        x: Ui.space4
+                        y: Ui.space4
+                        width: Math.max(0, parent.width - Ui.space8)
+                        text: player.updateNotes
+                        color: Ui.textSecondary
+                        wrapMode: Text.Wrap
+                        font.pixelSize: Ui.textCallout
+                    }
+                }
             }
         }
     }

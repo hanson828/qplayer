@@ -66,7 +66,7 @@ public final class CorePluginHostApi implements PolicyAwarePluginHostApi, AutoCl
     private static final int MAX_URL_GRANT_ENTRIES = 512;
     private final Map<String, Boolean> urlGrants = new ConcurrentHashMap<>();
     private final PluginNetworkOperations network =
-            new PluginNetworkOperations(4, "qplayer-plugin-net");
+            new PluginNetworkOperations(8, "qplayer-plugin-net");
     private final Path storageRoot;
     private final PluginCredentialVault credentials;
     private final Gson gson = new Gson();
@@ -107,7 +107,7 @@ public final class CorePluginHostApi implements PolicyAwarePluginHostApi, AutoCl
         return manifest != null && manifest.permissionSet().contains(permission);
     }
 
-    @Override public void register(PluginManifest manifest) {
+    @Override public synchronized void register(PluginManifest manifest) {
         manifest.validate();
         policies.put(manifest.id, manifest);
         // A new or updated manifest carries a different domain grant, so nothing
@@ -115,7 +115,7 @@ public final class CorePluginHostApi implements PolicyAwarePluginHostApi, AutoCl
         urlGrants.clear();
     }
 
-    @Override public void unregister(String pluginId) {
+    @Override public synchronized void unregister(String pluginId) {
         policies.remove(pluginId);
         urlGrants.clear();
         AppBridge bridge = appBridge;
@@ -142,19 +142,48 @@ public final class CorePluginHostApi implements PolicyAwarePluginHostApi, AutoCl
      */
     public boolean allowsReturnedUrl(String pluginId, String url) {
         PluginManifest manifest = policies.get(pluginId);
-        if (manifest == null) return false;
-        String host;
-        boolean clearText;
-        try {
-            URI uri = URI.create(url);
-            host = uri.getHost();
-            clearText = "http".equalsIgnoreCase(uri.getScheme());
-        } catch (RuntimeException malformed) {
-            return false;
+        if (manifest == null || url == null || url.isEmpty()) return false;
+        String scheme = null;
+        String host = null;
+        int sep = url.indexOf("://");
+        if (sep > 0) {
+            String rawScheme = url.substring(0, sep);
+            if ("https".equalsIgnoreCase(rawScheme)) scheme = "https";
+            else if ("http".equalsIgnoreCase(rawScheme)) scheme = "http";
+            else return false;
+            int authStart = sep + 3;
+            int authEnd = url.length();
+            for (int i = authStart; i < authEnd; i++) {
+                char c = url.charAt(i);
+                if (c == '/' || c == '?' || c == '#') {
+                    authEnd = i;
+                    break;
+                }
+            }
+            if (authEnd > authStart) {
+                boolean simpleHost = true;
+                for (int i = authStart; i < authEnd; i++) {
+                    char c = url.charAt(i);
+                    if (c == '@' || c == ':' || c == '[' || c == ']' || c <= ' ') {
+                        simpleHost = false;
+                        break;
+                    }
+                }
+                if (simpleHost) host = url.substring(authStart, authEnd);
+            }
         }
-        if (host == null) return false;
-        String scheme = URI.create(url).getScheme();
-        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
+        if (host == null || scheme == null) {
+            try {
+                URI uri = URI.create(url);
+                host = uri.getHost();
+                scheme = uri.getScheme();
+            } catch (RuntimeException malformed) {
+                return false;
+            }
+            if (host == null || scheme == null) return false;
+            if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return false;
+        }
+        boolean clearText = "http".equalsIgnoreCase(scheme);
         // Scheme is part of the key: http and https on the same host are different
         // answers, since clear text needs its own permission.
         String key = pluginId + "|" + (clearText ? "http" : "https")

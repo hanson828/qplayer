@@ -283,6 +283,7 @@ Item {
                     playCount: modelData.playCount || 0
                     coverUrl: modelData.coverUrl
                     coverThumbPath: modelData.coverThumbPath || ""
+                    sharedMenu: homePlaylistMenu
                     onClicked: { page.pendingPlaylist = modelData; page.openPlaylist() }
                 }
             }
@@ -310,6 +311,7 @@ Item {
                     playCount: modelData.playCount || 0
                     coverUrl: modelData.coverUrl
                     coverThumbPath: modelData.coverThumbPath || ""
+                    sharedMenu: homePlaylistMenu
                     onClicked: { page.pendingPlaylist = modelData; page.openPlaylist() }
                 }
             }
@@ -350,6 +352,9 @@ Item {
             SongContextMenu {
                 id: homeSongMenu
                 onClosed: if (menuRow) menuRow._menuArmed = false
+            }
+            PlaylistContextMenu {
+                id: homePlaylistMenu
             }
         }
     }

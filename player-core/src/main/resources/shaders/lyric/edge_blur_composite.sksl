@@ -1,0 +1,44 @@
+// Single-pass progressive edge blur composite for the lyric column:
+// blends a 1:1 sharp snapshot of the column across the lit plateau with a
+// half-resolution blurred snapshot toward the top and bottom edges, then applies
+// the vertical edge fade and column alpha without nested saveLayer FBOs.
+uniform shader sharpTex;
+uniform shader blurTex;
+uniform float colTopY;
+uniform float colHeight;
+uniform float2 devOrigin;
+uniform float2 ctmScale;
+uniform float2 ctmTrans;
+uniform float2 blurRatio;
+uniform float4 bandStops;
+uniform float fadeFrac;
+uniform float overallAlpha;
+
+half4 main(float2 p) {
+    float t = clamp((p.y - colTopY) / max(1.0, colHeight), 0.0, 1.0);
+    float edgeFade = fadeFrac > 0.0001
+            ? min(clamp(t / fadeFrac, 0.0, 1.0), clamp((1.0 - t) / fadeFrac, 0.0, 1.0))
+            : 1.0;
+    float alpha = edgeFade * overallAlpha;
+    if (alpha <= 0.001) return half4(0.0);
+
+    float sharpW = 0.0;
+    if (t >= bandStops.y && t <= bandStops.z) {
+        sharpW = 1.0;
+    } else if (t > bandStops.x && t < bandStops.y) {
+        sharpW = (t - bandStops.x) / max(0.0001, bandStops.y - bandStops.x);
+    } else if (t > bandStops.z && t < bandStops.w) {
+        sharpW = (bandStops.w - t) / max(0.0001, bandStops.w - bandStops.z);
+    }
+    float blurW = 1.0 - sharpW;
+
+    float2 snap = p * ctmScale + ctmTrans - devOrigin;
+    half4 color = half4(0.0);
+    if (sharpW > 0.001) {
+        color += sharpTex.eval(snap) * half(sharpW);
+    }
+    if (blurW > 0.001) {
+        color += blurTex.eval(snap * blurRatio) * half(blurW);
+    }
+    return color * half(alpha);
+}

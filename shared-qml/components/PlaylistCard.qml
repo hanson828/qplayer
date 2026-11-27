@@ -39,10 +39,46 @@ Item {
     // it was rather than growing a button nobody there asked for.
     property bool showOverflow: false
     property real tile: 160
+    property var sharedMenu: null
+    readonly property var _menu: card.sharedMenu !== null ? card.sharedMenu : fallbackMenuLoader.item
     property bool _menuArmed: false
+    property var _pendingAnchor: null
+    property real _pendingAx: 0
+    property real _pendingAy: 0
+
+    function _triggerOpen() { card.clicked() }
+    function _triggerDelete() { card.deleteRequested() }
+    function _triggerUnsubscribe() { card.unsubscribeRequested() }
+
+    function _openMenu(anchor, ax, ay) {
+        var m = card._menu
+        if (m !== null) {
+            if (card.sharedMenu !== null) {
+                if (m.opened) m.dismissImmediately()
+                m.menuTarget = card
+                m.playlistId = card.playlistId
+                m.deletable = card.deletable
+                m.subscribed = card.subscribed
+            }
+            m.rebuild()
+            m.open(anchor, ax, ay)
+            return
+        }
+        card._pendingAnchor = anchor
+        card._pendingAx = ax
+        card._pendingAy = ay
+        fallbackMenuLoader.active = true
+    }
+
     onPlaylistIdChanged: {
         card._menuArmed = false
-        if (cardMenu && cardMenu.opened) cardMenu.dismissImmediately()
+        card._pendingAnchor = null
+        if (card.sharedMenu !== null) {
+            if (card.sharedMenu.menuTarget === card && card.sharedMenu.opened)
+                card.sharedMenu.dismissImmediately()
+        } else if (fallbackMenuLoader.item && fallbackMenuLoader.item.opened) {
+            fallbackMenuLoader.item.dismissImmediately()
+        }
         if (dragArea && !dragArea._longFired) dragArea.cancelGesture()
     }
     signal clicked()
@@ -218,13 +254,11 @@ Item {
         }
         onLongPressed: {
             card._menuArmed = true
-            cardMenu.rebuild()
-            cardMenu.open(cardRipple, cardRipple.pressX, cardRipple.pressY)
+            card._openMenu(cardRipple, cardRipple.pressX, cardRipple.pressY)
         }
         onContextMenuRequested: {
             card._menuArmed = true
-            cardMenu.rebuild()
-            cardMenu.open(cardRipple, cardRipple.pressX, cardRipple.pressY)
+            card._openMenu(cardRipple, cardRipple.pressX, cardRipple.pressY)
         }
     }
 
@@ -357,21 +391,31 @@ Item {
         }
         MouseArea {
             anchors.fill: parent
-            onClicked: {
-                cardMenu.rebuild()
-                cardMenu.open(overflowButton, 0, overflowButton.height)
-            }
+            onClicked: card._openMenu(overflowButton, 0, overflowButton.height)
         }
     }
 
-    PlaylistContextMenu {
-        id: cardMenu
-        playlistId: card.playlistId
-        deletable: card.deletable
-        subscribed: card.subscribed
-        onOpenRequested: card.clicked()
-        onDeleteRequested: card.deleteRequested()
-        onUnsubscribeRequested: card.unsubscribeRequested()
-        onClosed: card._menuArmed = false
+    Loader {
+        id: fallbackMenuLoader
+        active: false
+        onLoaded: {
+            if (item && card._pendingAnchor !== null) {
+                var a = card._pendingAnchor
+                card._pendingAnchor = null
+                item.rebuild()
+                item.open(a, card._pendingAx, card._pendingAy)
+            }
+        }
+        sourceComponent: Component {
+            PlaylistContextMenu {
+                playlistId: card.playlistId
+                deletable: card.deletable
+                subscribed: card.subscribed
+                onOpenRequested: card.clicked()
+                onDeleteRequested: card.deleteRequested()
+                onUnsubscribeRequested: card.unsubscribeRequested()
+                onClosed: card._menuArmed = false
+            }
+        }
     }
 }

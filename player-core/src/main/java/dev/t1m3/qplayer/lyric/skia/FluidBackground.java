@@ -152,6 +152,8 @@ public final class FluidBackground {
     // it sits on the shared fluidPaint rather than in any one style's shader.
     private int activeSaturationPct = 100;
     private ColorFilter saturationFilter;
+    private final RuntimeEffectBuilder[] fluidBuilders = new RuntimeEffectBuilder[3];
+    private final RuntimeEffectBuilder[] fluidFadeBuilders = new RuntimeEffectBuilder[3];
 
     public FluidBackground(long startNs) {
         this.startNs = startNs;
@@ -266,6 +268,7 @@ public final class FluidBackground {
         DecodedTextures ready = takeDecoded(trackKey);
         if (ready != null) {
             releasePrev();
+            closeBuilders(fluidBuilders);
             coverPrevShader = coverShader;
             coverPrev = cover;
             coverPrevAdjustedShader = coverAdjustedShader;
@@ -431,12 +434,33 @@ public final class FluidBackground {
         if (coverPrevAdjusted != null) { coverPrevAdjusted.close(); coverPrevAdjusted = null; }
         coverPrevAngles = null;
         coverPrevMesh = null;
+        closeBuilders(fluidFadeBuilders);
+    }
+
+    private RuntimeEffectBuilder builderFor(int style, boolean fading) {
+        int safeStyle = normalizeStyle(style);
+        RuntimeEffectBuilder[] pool = fading ? fluidFadeBuilders : fluidBuilders;
+        RuntimeEffectBuilder b = pool[safeStyle];
+        if (b == null) {
+            b = new RuntimeEffectBuilder(makeEffect(safeStyle, fading));
+            pool[safeStyle] = b;
+        }
+        return b;
+    }
+
+    private static void closeBuilders(RuntimeEffectBuilder[] pool) {
+        for (int i = 0; i < pool.length; i++) {
+            if (pool[i] != null) {
+                pool[i].close();
+                pool[i] = null;
+            }
+        }
     }
 
     // Render the fluid shader into `dstRect` with the given resolution + time. The
     // runtime shader bakes its uniforms at makeShader time, so an animated `time`
     // rebuilds it each call -- but that just instantiates the already-compiled
-    // effect; the cover child shader and the Paint are reused.
+    // effect and reuses both child shaders and the native RuntimeEffectBuilder.
     private void drawFluid(Canvas canvas, Rect dstRect, float resW, float resH, float time, float fade, float alpha) {
         if (activeStyle == STYLE_MESH_GRADIENT) {
             drawMeshGradient(canvas, resW, resH, time, fade, alpha);
@@ -448,19 +472,18 @@ public final class FluidBackground {
         Shader previousChild = rawTexture ? coverPrevShader : coverPrevAdjustedShader;
         Shader shaded = null;
         try {
-            try (RuntimeEffectBuilder b = new RuntimeEffectBuilder(makeEffect(activeStyle, fading))) {
-                b.setUniform("resolution", resW, resH);
-                b.setUniform("time", time);
-                b.setChild("cover", currentChild);
-                if (activeStyle == STYLE_PIXI_RENDERER) b.setUniform("bend", bendDirection);
-                if (activeStyle != STYLE_CLASSIC) b.setUniform("angles", coverAngles);
-                if (fading) {
-                    b.setChild("coverPrev", previousChild);
-                    b.setUniform("fade", fade);
-                    if (activeStyle != STYLE_CLASSIC) b.setUniform("anglesPrev", coverPrevAngles);
-                }
-                shaded = b.makeShader();
+            RuntimeEffectBuilder b = builderFor(activeStyle, fading);
+            b.setUniform("resolution", resW, resH);
+            b.setUniform("time", time);
+            b.setChild("cover", currentChild);
+            if (activeStyle == STYLE_PIXI_RENDERER) b.setUniform("bend", bendDirection);
+            if (activeStyle != STYLE_CLASSIC) b.setUniform("angles", coverAngles);
+            if (fading) {
+                b.setChild("coverPrev", previousChild);
+                b.setUniform("fade", fade);
+                if (activeStyle != STYLE_CLASSIC) b.setUniform("anglesPrev", coverPrevAngles);
             }
+            shaded = b.makeShader();
             fluidPaint.setShader(shaded);
             if (alpha < 0.999f) {
                 fluidPaint.setAlpha(Math.round(alpha * 255f));
@@ -492,13 +515,11 @@ public final class FluidBackground {
         if (mesh == null || coverChild == null || alpha <= 0f) return;
         Shader shaded = null;
         try {
-            try (RuntimeEffectBuilder b = new RuntimeEffectBuilder(
-                    makeEffect(STYLE_MESH_GRADIENT, false))) {
-                b.setUniform("time", time);
-                b.setUniform("alpha", alpha);
-                b.setChild("cover", coverChild);
-                shaded = b.makeShader();
-            }
+            RuntimeEffectBuilder b = builderFor(STYLE_MESH_GRADIENT, false);
+            b.setUniform("time", time);
+            b.setUniform("alpha", alpha);
+            b.setChild("cover", coverChild);
+            shaded = b.makeShader();
             fluidPaint.setShader(shaded);
             Canvas._nDrawVertices(canvas._ptr, 0, mesh.points(w, h), null,
                     mesh.textureCoordinates, mesh.indices, BlendMode.SRC_OVER.ordinal(), fluidPaint._ptr);
@@ -547,6 +568,8 @@ public final class FluidBackground {
     public void invalidateGpuContext() {
         releaseLive();
         invalidateStatic();
+        closeBuilders(fluidBuilders);
+        closeBuilders(fluidFadeBuilders);
     }
 
     public void dispose() {
@@ -572,6 +595,7 @@ public final class FluidBackground {
             coverAdjusted = null;
         }
         releasePrev();
+        closeBuilders(fluidBuilders);
         releaseLive();
         invalidateStatic();
         if (saturationFilter != null) { saturationFilter.close(); saturationFilter = null; }

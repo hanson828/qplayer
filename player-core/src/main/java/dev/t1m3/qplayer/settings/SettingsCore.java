@@ -78,6 +78,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private volatile boolean resolvedDarkSnapshot;
     private boolean systemDark;
     private boolean loaded;
+    private boolean deferFontWarmup;
 
     // ---- host setup ---------------------------------------------------------
 
@@ -187,23 +188,36 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
      *                 {@link SettingsCatalog#ANDROID} — filters the row list.
      */
     public void load(SettingsStore store, String platform) {
+        load(store, platform, false);
+    }
+
+    /**
+     * Seed every value from {@code store}, optionally deferring heavyweight lyric
+     * shader/HarfBuzz warmup until after the host renders its first frame.
+     */
+    public void load(SettingsStore store, String platform, boolean deferFontWarmup) {
         this.store = store;
         this.platform = platform;
-        appVolume.set(Math.max(0, Math.min(100, store.getInt(APP_VOLUME_KEY, 80))));
-        migrateLegacyKeys();
-        this.specs = new ArrayList<>();
-        for (SettingSpec s : SettingsCatalog.specs()) {
-            if (!s.appliesTo(platform)) continue;
-            specs.add(s);
-            specsByKey.put(s.key, s);
-            if (s.hasValue()) values.put(s.key, new Property<>(read(s)));
+        this.deferFontWarmup = deferFontWarmup;
+        try {
+            appVolume.set(Math.max(0, Math.min(100, store.getInt(APP_VOLUME_KEY, 80))));
+            migrateLegacyKeys();
+            this.specs = new ArrayList<>();
+            for (SettingSpec s : SettingsCatalog.specs()) {
+                if (!s.appliesTo(platform)) continue;
+                specs.add(s);
+                specsByKey.put(s.key, s);
+                if (s.hasValue()) values.put(s.key, new Property<>(read(s)));
+            }
+            specs = Collections.unmodifiableList(specs);
+            availableFontFamilies.set(sortedFontFamilies());
+            registerFontProviders();
+            actions.putIfAbsent("exportSettings", () -> exportConfigOpen.set(Boolean.TRUE));
+            loaded = true;
+            applyAll();
+        } finally {
+            this.deferFontWarmup = false;
         }
-        specs = Collections.unmodifiableList(specs);
-        availableFontFamilies.set(sortedFontFamilies());
-        registerFontProviders();
-        actions.putIfAbsent("exportSettings", () -> exportConfigOpen.set(Boolean.TRUE));
-        loaded = true;
-        applyAll();
     }
 
     // ---- QML API ------------------------------------------------------------
@@ -619,7 +633,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         c.dropShadow.setValue(bool("lyricShadow"));
         c.linearAnimForPlainLrc.setValue(bool("lyricLinearAnim"));
         c.edgeBlur.setValue(bool("lyricEdgeBlur"));
-        Fonts.warmupFromConfig();
+        if (!deferFontWarmup) Fonts.warmupFromConfig();
     }
 
     // ---- fonts --------------------------------------------------------------

@@ -18,7 +18,7 @@ final class AndroidRenderPolicy {
     private AndroidRenderPolicy() { }
 
     static boolean hasActiveQmlWork(Item root) {
-        return hasRunningClock(root) || hasPendingVisibleImage(root, true);
+        return hasActiveQmlWork(root, true);
     }
 
     static boolean shouldRenderContinuously(boolean hostAnimation,
@@ -26,10 +26,10 @@ final class AndroidRenderPolicy {
                                              boolean settlingAfterWake,
                                              Item root) {
         return hostAnimation || changedThisFrame || settlingAfterWake
-                || hasActiveQmlWork(root);
+                || hasActiveQmlWork(root, true);
     }
 
-    private static boolean hasRunningClock(Item item) {
+    private static boolean hasActiveQmlWork(Item item, boolean ancestorsVisible) {
         if (item == null) return false;
         if (item instanceof AbstractAnimation
                 && Boolean.TRUE.equals(((AbstractAnimation) item).running.peek())) {
@@ -45,33 +45,17 @@ final class AndroidRenderPolicy {
                 && Boolean.TRUE.equals(((Flickable) item).moving.peek())) {
             return true;
         }
-        for (int i = 0; i < item.children.size(); i++) {
-            if (hasRunningClock(item.children.get(i))) return true;
-        }
-        for (int i = 0; i < item.resources.size(); i++) {
-            if (hasRunningClock(item.resources.get(i))) return true;
-        }
-        return false;
-    }
-
-    private static boolean hasPendingVisibleImage(Item item, boolean ancestorsVisible) {
-        if (item == null) return false;
         boolean visible = ancestorsVisible
                 && Boolean.TRUE.equals(item.visible.peek())
                 && item.opacity.peekFloat() > 0.001f;
-        if (!visible) return false;
-
-        if (item instanceof Image) {
-            Image image = (Image) item;
-            if (image.hasPendingDecode()) {
-                return true;
-            }
+        if (visible && item instanceof Image && ((Image) item).hasPendingDecode()) {
+            return true;
         }
         for (int i = 0; i < item.children.size(); i++) {
-            if (hasPendingVisibleImage(item.children.get(i), true)) return true;
+            if (hasActiveQmlWork(item.children.get(i), visible)) return true;
         }
         for (int i = 0; i < item.resources.size(); i++) {
-            if (hasPendingVisibleImage(item.resources.get(i), true)) return true;
+            if (hasActiveQmlWork(item.resources.get(i), visible)) return true;
         }
         return false;
     }

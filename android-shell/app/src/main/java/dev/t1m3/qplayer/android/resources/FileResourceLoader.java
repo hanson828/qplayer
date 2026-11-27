@@ -5,6 +5,7 @@ import android.content.res.AssetManager;
 import io.github.timer_err.qml4j.render.ResourceLoader;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -44,6 +45,16 @@ public final class FileResourceLoader implements ResourceLoader {
     private static byte[] readFile(String path) {
         File f = new File(path);
         if (!f.isFile()) return null;
+        long len = f.length();
+        if (len > 0 && len <= 64L * 1024L * 1024L) {
+            byte[] exact = new byte[(int) len];
+            try (DataInputStream in = new DataInputStream(new FileInputStream(f))) {
+                in.readFully(exact);
+                return exact;
+            } catch (IOException e) {
+                return null;
+            }
+        }
         try (FileInputStream in = new FileInputStream(f)) {
             return readAll(in);
         } catch (IOException e) {
@@ -52,8 +63,14 @@ public final class FileResourceLoader implements ResourceLoader {
     }
 
     private static byte[] readAll(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
+        int hint = 0;
+        try {
+            hint = in.available();
+        } catch (IOException ignored) {
+        }
+        int cap = Math.max(8192, Math.min(hint, 32 * 1024 * 1024));
+        ByteArrayOutputStream out = new ByteArrayOutputStream(cap);
+        byte[] buf = new byte[65536];
         int n;
         while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         return out.toByteArray();

@@ -168,6 +168,7 @@ Flickable {
                 coverThumbPath: modelData.coverThumbPath || ""
                 deletable: !!modelData.deletable
                 subscribed: !!modelData.subscribed
+                sharedMenu: listPlaylistMenu
                 visible: view._dragFrom !== index
                 reorderable: view.reorderable
                 controlsRevealed: view.reorderable ? (view.revealedIndex === index) : true
@@ -212,6 +213,10 @@ Flickable {
                 onReorderReleased: view._endDrag()
                 onReorderCanceled: view._cancelDrag()
             }
+        }
+
+        PlaylistContextMenu {
+            id: listPlaylistMenu
         }
 
         PlaylistListRow {

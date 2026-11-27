@@ -3,13 +3,15 @@ package dev.t1m3.qplayer.lyric.skia;
 import io.github.humbleui.skija.BlendMode;
 import io.github.humbleui.skija.Canvas;
 import io.github.humbleui.skija.DirectContext;
+import io.github.humbleui.skija.FilterTileMode;
 import io.github.humbleui.skija.Image;
 import io.github.humbleui.skija.ImageFilter;
 import io.github.humbleui.skija.ImageInfo;
 import io.github.humbleui.skija.Matrix33;
 import io.github.humbleui.skija.Paint;
+import io.github.humbleui.skija.RuntimeEffect;
+import io.github.humbleui.skija.RuntimeEffectBuilder;
 import io.github.humbleui.skija.SamplingMode;
-import io.github.humbleui.skija.SaveLayerRec;
 import io.github.humbleui.skija.Shader;
 import io.github.humbleui.skija.Surface;
 import io.github.humbleui.types.RRect;
@@ -27,6 +29,10 @@ import dev.t1m3.qplayer.lyric.tempera.TemperaCompositor;
 import dev.t1m3.qplayer.lyric.tempera.TemperaHostPage;
 import dev.t1m3.qplayer.lyric.tempera.TemperaTuning;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -115,6 +121,8 @@ public final class LyricCompositor {
 
     private List<LyricLine> lastLyrics;
     private float lyricSlide;
+    private long lyricSlideNs;
+    private static final float LYRIC_SLIDE_TAU = 0.071f;
     private long renderedVersion = -1;
     // Whether composite() skipped the main-tree relayout this frame (idle fast path).
     // The host reads it for its frame profiler — the skip decision lives here now, so
@@ -155,9 +163,17 @@ public final class LyricCompositor {
     private Shader lyFadeShader;
     private final Paint lyMaskPaint = new Paint();
     private Item miniPlayerItem;
+    private Property<?> miniLgProp;
+    private Property<?> miniRadiusProp;
+    private Property<?> miniColorProp;
+    private Property<?> miniLgSurfaceColorProp;
+    private Object lastMiniColorRaw;
+    private int cachedMiniColor;
     private Rect expandingRect;
     private float expandingRadius;
     private final Paint scrimPaint = new Paint();
+    private Rect scrimRect;
+    private float scrimRectW = -1f, scrimRectH = -1f;
     private final Paint cardBasePaint = new Paint();
     private ImageFilter scrimBlurFilter;
     private float lastScrimSigma = -1f;
@@ -201,7 +217,18 @@ public final class LyricCompositor {
     // first frame that draws the page again.
     private boolean pageCachesReleased;
     private boolean compositorGpuPrewarmed;
+    private boolean fluidGpuPrewarmed;
     private String prewarmedMediaId;
+    private static final String EDGE_BLUR_COMPOSITE_SHADER = "/shaders/lyric/edge_blur_composite.sksl";
+    private static RuntimeEffect edgeBlurCompositeEffect;
+    private static boolean edgeBlurCompositeAttempted;
+    private RuntimeEffectBuilder edgeBlurCompositeBuilder;
+    private final Paint edgeBlurCompositePaint = new Paint();
+    private Surface columnBlurSurface;
+    private int columnBlurW = -1, columnBlurH = -1;
+    private Rect columnBlurRect;
+    private ImageFilter halfResBlurFilter;
+    private float halfResBlurSigmaX = -1f, halfResBlurSigmaY = -1f;
     private float bandShaderColH = -1f;
     private float bandShaderTopY = -1f;
     private float bandFracTop = -1f, bandFracBottom = -1f; // cached lit-band fractions
@@ -286,6 +313,11 @@ public final class LyricCompositor {
         lyMaskPaint.close();
         blurBasePaint.close();
         columnBlurPaint.close();
+        if (edgeBlurCompositeBuilder != null) {
+            edgeBlurCompositeBuilder.close();
+            edgeBlurCompositeBuilder = null;
+        }
+        edgeBlurCompositePaint.close();
         lyLayerPaint.close();
         scrimPaint.close();
         cardBasePaint.close();
@@ -399,6 +431,16 @@ public final class LyricCompositor {
         Item miniPlayer = view.findByObjectName("miniPlayer");
         miniPlayerItem = miniPlayer;
         if (miniPlayer != null) {
+            miniLgProp = MemberAccess.propertyOf(miniPlayer, "liquidGlass");
+            miniRadiusProp = MemberAccess.propertyOf(miniPlayer, "radius");
+            miniColorProp = MemberAccess.propertyOf(miniPlayer, "color");
+            for (int i = 0; i < miniPlayer.children.size(); i++) {
+                Item child = miniPlayer.children.get(i);
+                if ("liquidGlassMiniPlayerSurface".equals(child.objectName.peek())) {
+                    miniLgSurfaceColorProp = MemberAccess.propertyOf(child, "surfaceColor");
+                    break;
+                }
+            }
             MiniPlayerLoadingAnimation clock = new MiniPlayerLoadingAnimation(miniPlayer);
             clock.parent.set(miniPlayer);
             miniPlayer.children.add(clock);
@@ -453,13 +495,11 @@ public final class LyricCompositor {
     private float queryMiniPlayerRadius(float miniH) {
         if (miniPlayerItem != null) {
             try {
-                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
-                if (lgProp != null && Boolean.TRUE.equals(lgProp.peek())) {
+                if (miniLgProp != null && Boolean.TRUE.equals(miniLgProp.peek())) {
                     return miniH * 0.5f;
                 }
-                Property<?> radProp = MemberAccess.propertyOf(miniPlayerItem, "radius");
-                if (radProp != null) {
-                    float r = radProp.peekFloat();
+                if (miniRadiusProp != null) {
+                    float r = miniRadiusProp.peekFloat();
                     if (r > 0f) return r;
                 }
             } catch (Throwable ignored) {}
@@ -470,20 +510,15 @@ public final class LyricCompositor {
     private int queryMiniPlayerSurfaceColor(SettingsBridge settings) {
         if (miniPlayerItem != null) {
             try {
-                for (int i = 0; i < miniPlayerItem.children.size(); i++) {
-                    Item child = miniPlayerItem.children.get(i);
-                    if ("liquidGlassMiniPlayerSurface".equals(child.objectName.peek())) {
-                        Property<?> col = MemberAccess.propertyOf(child, "surfaceColor");
-                        if (col != null) {
-                            return Renderer.parseColor(String.valueOf(col.peek()));
-                        }
+                Property<?> col = miniLgSurfaceColorProp != null ? miniLgSurfaceColorProp : miniColorProp;
+                if (col != null) {
+                    Object raw = col.peek();
+                    if (col == miniLgSurfaceColorProp) {
+                        return parseMiniColorCached(raw);
                     }
-                }
-                Property<?> colProp = MemberAccess.propertyOf(miniPlayerItem, "color");
-                if (colProp != null) {
-                    String s = String.valueOf(colProp.peek());
+                    String s = String.valueOf(raw);
                     if (!s.isEmpty() && !"transparent".equalsIgnoreCase(s)) {
-                        return Renderer.parseColor(s);
+                        return parseMiniColorCached(s);
                     }
                 }
             } catch (Throwable ignored) {}
@@ -492,11 +527,18 @@ public final class LyricCompositor {
         return isDark ? 0xFF242424 : 0xFFFFFFFF;
     }
 
+    private int parseMiniColorCached(Object raw) {
+        if (raw != lastMiniColorRaw && !Objects.equals(raw, lastMiniColorRaw)) {
+            lastMiniColorRaw = raw;
+            cachedMiniColor = Renderer.parseColor(String.valueOf(raw));
+        }
+        return cachedMiniColor;
+    }
+
     private boolean isMiniPlayerLiquidGlass() {
-        if (miniPlayerItem != null) {
+        if (miniLgProp != null) {
             try {
-                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
-                if (lgProp != null) return Boolean.TRUE.equals(lgProp.peek());
+                return Boolean.TRUE.equals(miniLgProp.peek());
             } catch (Throwable ignored) {}
         }
         return false;
@@ -655,10 +697,15 @@ public final class LyricCompositor {
                 int scrimColor = isDark ? 0xFF000000 : 0xFF181818;
                 scrimPaint.setColor(scrimColor);
                 scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
+                if (scrimRect == null || scrimRectW != lw || scrimRectH != lh) {
+                    scrimRect = Rect.makeWH(lw, lh);
+                    scrimRectW = lw;
+                    scrimRectH = lh;
+                }
 
                 int scS = canvas.save();
                 canvas.scale(uiScale, uiScale);
-                canvas.drawRect(Rect.makeWH(lw, lh), scrimPaint);
+                canvas.drawRect(scrimRect, scrimPaint);
                 canvas.restoreToCount(scS);
             }
         }
@@ -719,11 +766,27 @@ public final class LyricCompositor {
         boolean open = Boolean.TRUE.equals(controller.lyricsOpen.peek());
         float target = open ? 1f : 0f;
         // The lyric page is a spatial bottom sheet, independent of the navigation
-        // page preset. Ease a little more slowly than the old 0.22/0.18 response while
-        // retaining the same interruptible, frame-stable approach.
-        // 转场速率进一步调慢至优雅舒缓的柔和节奏（0.11f，约 380~420ms，舒展自然）
-        lyricSlide += (target - lyricSlide) * 0.11f;
-        if (Math.abs(target - lyricSlide) < 0.001f) lyricSlide = target;
+        // page preset. Frame-rate-independent exponential decay (~380~420ms at 120Hz)
+        // keeps opening/closing cadence identical across 60Hz/90Hz/120Hz panels.
+        long slideNowNs = System.nanoTime();
+        if (Math.abs(target - lyricSlide) >= 0.001f) {
+            float dt = lyricSlideNs == 0L ? (1f / 120f)
+                    : (slideNowNs - lyricSlideNs) / 1_000_000_000f;
+            if (dt > 0.05f) dt = 0.05f;
+            if (dt > 0f) {
+                lyricSlide += (target - lyricSlide)
+                        * (1f - (float) Math.exp(-dt / LYRIC_SLIDE_TAU));
+            }
+            if (Math.abs(target - lyricSlide) < 0.001f) {
+                lyricSlide = target;
+                lyricSlideNs = 0L;
+            } else {
+                lyricSlideNs = slideNowNs;
+            }
+        } else {
+            lyricSlide = target;
+            lyricSlideNs = 0L;
+        }
         // Publish to QML so the LyricOverlay chrome fades in/out in lockstep. set()
         // no-ops on an unchanged value, so once settled-closed this stops bumping the
         // change version.
@@ -736,7 +799,10 @@ public final class LyricCompositor {
             if (ctx != null && fbW > 0 && fbH > 0) {
                 float w = fbW / uiScale;
                 float h = fbH / uiScale;
-                fluidBg.prewarmGpu(ctx, w, h, uiScale);
+                if (!fluidGpuPrewarmed) {
+                    fluidGpuPrewarmed = true;
+                    fluidBg.prewarmGpu(ctx, w, h, uiScale);
+                }
                 boolean landscape = w > h;
                 boolean coverOnly = Boolean.TRUE.equals(controller.lyricsCoverOnly.peek())
                         || Boolean.TRUE.equals(controller.coverModeManual.peek());
@@ -753,6 +819,7 @@ public final class LyricCompositor {
                 if (!compositorGpuPrewarmed) {
                     compositorGpuPrewarmed = true;
                     ensureLyricShaders(colTopY, colH);
+                    ensureEdgeBlurCompositeEffect();
                     try {
                         Rect colRect = Rect.makeXYWH(colLeft, colTopY, w - colLeft, colH);
                         int sc = canvas.save();
@@ -776,15 +843,13 @@ public final class LyricCompositor {
                     String mediaId = controller.currentMediaId.peek();
                     if (!Objects.equals(prewarmedMediaId, mediaId)) {
                         prewarmedMediaId = mediaId;
-                        lyricRenderer.prewarmLayout(colW, pos, 64);
-                        if (ctx != null) {
-                            try (Surface dummyGpu = Surface.makeRenderTarget(ctx, false, ImageInfo.makeN32Premul(1, 1))) {
-                                if (dummyGpu != null) {
-                                    lyricRenderer.render(dummyGpu.getCanvas(), 0f, 0f, colW, colH, pos);
-                                }
-                            } catch (Throwable ignored) {}
-                        }
-                    } else {
+                        lyricRenderer.prewarmLayout(colW, pos, 16);
+                        try (Surface dummyGpu = Surface.makeRenderTarget(ctx, false, ImageInfo.makeN32Premul(1, 1))) {
+                            if (dummyGpu != null) {
+                                lyricRenderer.render(dummyGpu.getCanvas(), 0f, 0f, colW, colH, pos);
+                            }
+                        } catch (Throwable ignored) {}
+                    } else if (lyricRenderer.hasPendingLayout()) {
                         lyricRenderer.prewarmLayout(colW, pos, 4);
                     }
                 }
@@ -913,47 +978,47 @@ public final class LyricCompositor {
         float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
         ensureLyricShaders(colTopY, colH);
 
-        Rect miniBounds = queryMiniPlayerRect(w, h);
-        float startX = miniBounds.getLeft();
-        float startY = miniBounds.getTop();
-        float startW = miniBounds.getWidth();
-        float startH = miniBounds.getHeight();
-        float startR = queryMiniPlayerRadius(startH);
-        int surfaceColor = queryMiniPlayerSurfaceColor(settings);
-        boolean isLiquidGlass = isMiniPlayerLiquidGlass();
-
-        float curX = (1f - ease) * startX;
-        float curY = (1f - ease) * startY;
-        float curW = (1f - ease) * startW + ease * w;
-        float curH = (1f - ease) * startH + ease * h;
-        float targetR = settings != null ? settings.screenCornerRadius() : 0f;
-        float curR = (1f - ease) * startR + ease * targetR;
-
-        expandingRect = Rect.makeXYWH(curX, curY, curW, curH);
-        expandingRadius = curR;
-
         int sc = canvas.save();
         canvas.scale(uiScale, uiScale);
 
         int clipCount = -1;
-        if (lyricSlide < 0.999f || targetR > 0.5f) {
+        if (lyricSlide < 0.999f) {
+            Rect miniBounds = queryMiniPlayerRect(w, h);
+            float startX = miniBounds.getLeft();
+            float startY = miniBounds.getTop();
+            float startW = miniBounds.getWidth();
+            float startH = miniBounds.getHeight();
+            float startR = queryMiniPlayerRadius(startH);
+            int surfaceColor = queryMiniPlayerSurfaceColor(settings);
+            boolean isLiquidGlass = isMiniPlayerLiquidGlass();
+
+            float curX = (1f - ease) * startX;
+            float curY = (1f - ease) * startY;
+            float curW = (1f - ease) * startW + ease * w;
+            float curH = (1f - ease) * startH + ease * h;
+            float targetR = settings != null ? settings.screenCornerRadius() : 0f;
+            float curR = (1f - ease) * startR + ease * targetR;
+
+            expandingRect = Rect.makeXYWH(curX, curY, curW, curH);
+            expandingRadius = curR;
+
             clipCount = canvas.save();
             canvas.clipRRect(RRect.makeXYWH(curX, curY, curW, curH, curR), true);
-        }
 
-        // Fill expanding container base with MiniPlayer's exact surfaceColor
-        // so at ease=0 it matches the MiniPlayer's appearance perfectly without color jumps.
-        // For liquid glass:
-        // The MiniPlayer capsule is already a live translucent glass element rendered directly in the scene.
-        // Drawing a flat color over expandingRect would mask the live refraction and cause visual jump/flashing.
-        // Thus for liquid glass we do not draw cardBasePaint, letting the fluid backdrop smoothly crossfade over it.
-        if (lyricSlide < 0.999f && !isLiquidGlass) {
-            float baseAlpha = Math.max(0f, 1f - ease * 1.6f);
-            if (baseAlpha > 0.001f) {
-                cardBasePaint.setColor(surfaceColor);
-                cardBasePaint.setAlpha(Math.round(baseAlpha * 255f));
-                canvas.drawRect(expandingRect, cardBasePaint);
+            // Fill expanding container base with MiniPlayer's exact surfaceColor
+            // so at ease=0 it matches the MiniPlayer's appearance perfectly without color jumps.
+            // For liquid glass, let the fluid backdrop crossfade over the live glass capsule.
+            if (!isLiquidGlass) {
+                float baseAlpha = Math.max(0f, 1f - ease * 1.6f);
+                if (baseAlpha > 0.001f) {
+                    cardBasePaint.setColor(surfaceColor);
+                    cardBasePaint.setAlpha(Math.round(baseAlpha * 255f));
+                    canvas.drawRect(expandingRect, cardBasePaint);
+                }
             }
+        } else {
+            expandingRect = null;
+            expandingRadius = 0f;
         }
 
         // The expanding container (expandingRect) already animates its bounds and radius
@@ -1039,40 +1104,169 @@ public final class LyricCompositor {
             }
             int alpha = Math.round(Math.max(0f, Math.min(1f,
                     lyricShow * (float) Math.sqrt(fullWidthSwap) * trackReveal)) * 255f);
-            lyLayerPaint.setAlpha(alpha);
-            int lc = canvas.saveLayer(colRect, alpha < 255 ? lyLayerPaint : null);
             float s = 0.95f + 0.05f * lyricShow;
             float cx = colLeft + (w - colLeft) * 0.5f;
             float cy = colTopY + colH * 0.5f;
-            int zc = canvas.save();
-            canvas.translate(cx, cy);
-            canvas.scale(s, s);
-            canvas.translate(-cx, -cy);
-            // The layout swap travels instead of dissolving: this is the offset
-            // between where the column is drawn and where its snapped layout puts
-            // it, and it is 0 the moment the transition settles.
-            if (columnSlide != 0f) canvas.translate(columnSlide, 0f);
-            // Track-switch rise, under the same alpha: the column drifts up into
-            // its resting place while it fades in.
-            if (trackReveal < 1f) canvas.translate(0f, (1f - trackReveal) * TRACK_REVEAL_RISE);
-            LyricSkia.setCanvas(canvas);
-            // Progressive edge blur stays on continuously whenever enabled;
-            // rendering the column once into a GPU surface and blitting that snapshot
-            // ensures zero pop-in/jump during or at the end of the expand transition.
-            if (Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue())) {
-                drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos);
+            float revealRise = trackReveal < 1f ? (1f - trackReveal) * TRACK_REVEAL_RISE : 0f;
+            boolean edgeBlurOn = Boolean.TRUE.equals(LyricConfig.instance.edgeBlur.getValue());
+            if (edgeBlurOn && drawProgressiveBlurColumnSinglePass(
+                    canvas, colRect, colLeft + pad, colTopY, colW, colH, pos,
+                    s, cx, cy, columnSlide, revealRise, alpha / 255f)) {
+                // Fast single-pass GPU composite completed without nested saveLayer FBOs.
             } else {
-                lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
+                lyLayerPaint.setAlpha(alpha);
+                int lc = canvas.saveLayer(colRect, alpha < 255 ? lyLayerPaint : null);
+                int zc = canvas.save();
+                canvas.translate(cx, cy);
+                canvas.scale(s, s);
+                canvas.translate(-cx, -cy);
+                // The layout swap travels instead of dissolving: this is the offset
+                // between where the column is drawn and where its snapped layout puts
+                // it, and it is 0 the moment the transition settles.
+                if (columnSlide != 0f) canvas.translate(columnSlide, 0f);
+                // Track-switch rise, under the same alpha: the column drifts up into
+                // its resting place while it fades in.
+                if (revealRise != 0f) canvas.translate(0f, revealRise);
+                LyricSkia.setCanvas(canvas);
+                // Progressive edge blur stays on continuously whenever enabled;
+                // rendering the column once into a GPU surface and blitting that snapshot
+                // ensures zero pop-in/jump during or at the end of the expand transition.
+                if (edgeBlurOn) {
+                    drawProgressiveBlurColumn(canvas, colRect, colLeft + pad, colTopY, colW, colH, pos);
+                } else {
+                    lyricRenderer.render(canvas, colLeft + pad, colTopY, colW, colH, pos);
+                }
+                canvas.restoreToCount(zc);
+                applyColumnMask(canvas, lyFadeShader);
+                canvas.restoreToCount(lc);
             }
-            canvas.restoreToCount(zc);
-            applyColumnMask(canvas, lyFadeShader);
-            canvas.restoreToCount(lc);
         }
 
         if (clipCount >= 0) {
             canvas.restoreToCount(clipCount);
         }
         canvas.restoreToCount(sc);
+    }
+
+    private static synchronized RuntimeEffect ensureEdgeBlurCompositeEffect() {
+        if (edgeBlurCompositeAttempted) return edgeBlurCompositeEffect;
+        edgeBlurCompositeAttempted = true;
+        try (InputStream in = LyricCompositor.class.getResourceAsStream(EDGE_BLUR_COMPOSITE_SHADER)) {
+            if (in == null) return null;
+            InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8);
+            StringBuilder sb = new StringBuilder(2048);
+            char[] buf = new char[1024];
+            int n;
+            while ((n = reader.read(buf)) >= 0) sb.append(buf, 0, n);
+            edgeBlurCompositeEffect = RuntimeEffect.makeForShader(sb.toString());
+        } catch (Throwable t) {
+            dev.t1m3.qplayer.util.Logger.warn("edge blur composite shader load failed: {}", t.getMessage());
+            edgeBlurCompositeEffect = null;
+        }
+        return edgeBlurCompositeEffect;
+    }
+
+    private boolean drawProgressiveBlurColumnSinglePass(
+            Canvas canvas, Rect colRect, float leftX, float colTopY, float colW, float colH, long pos,
+            float scale, float cx, float cy, float columnSlide, float revealRise, float overallAlpha) {
+        if (overallAlpha <= 0.001f) return true;
+        RuntimeEffect effect = ensureEdgeBlurCompositeEffect();
+        if (effect == null) return false;
+        Matrix33 outerCtm = canvas.getLocalToDeviceAsMatrix33();
+        float[] om = outerCtm.getMat();
+        if (!placeColumnSnapshot(om, colRect)) return false;
+        float outerSx = om[0], outerSy = om[4], outerTx = om[2], outerTy = om[5];
+        Surface owner;
+        try {
+            owner = canvas.getSurface();
+        } catch (Throwable t) {
+            return false;
+        }
+        int sw = columnDevW, sh = columnDevH;
+        int bw = Math.max(1, (sw + 1) / 2);
+        int bh = Math.max(1, (sh + 1) / 2);
+        try (Surface screen = owner) {
+            if (screen == null) return false;
+            if (columnSurface == null || sw > columnSurfaceW || sh > columnSurfaceH
+                    || (long) columnSurfaceW * columnSurfaceH > 2L * sw * sh) {
+                closeColumnSurface();
+                columnSurface = screen.makeSurface(sw, sh);
+                if (columnSurface == null) return false;
+                columnSurfaceW = sw;
+                columnSurfaceH = sh;
+            }
+            if (columnBlurSurface == null || bw > columnBlurW || bh > columnBlurH
+                    || (long) columnBlurW * columnBlurH > 2L * bw * bh) {
+                closeColumnBlurSurface();
+                columnBlurSurface = screen.makeSurface(bw, bh);
+                if (columnBlurSurface == null) return false;
+                columnBlurW = bw;
+                columnBlurH = bh;
+            }
+        }
+        if (columnBlurRect == null || columnBlurRect.getWidth() != bw || columnBlurRect.getHeight() != bh) {
+            columnBlurRect = Rect.makeWH(bw, bh);
+        }
+
+        Canvas c = columnSurface.getCanvas();
+        c.clear(0);
+        int saved = c.save();
+        c.translate(-columnDevL, -columnDevT);
+        c.concat(outerCtm);
+        c.translate(cx, cy);
+        c.scale(scale, scale);
+        c.translate(-cx, -cy);
+        if (columnSlide != 0f) c.translate(columnSlide, 0f);
+        if (revealRise != 0f) c.translate(0f, revealRise);
+        LyricSkia.setCanvas(c);
+        lyricRenderer.render(c, leftX, colTopY, colW, colH, pos);
+        c.restoreToCount(saved);
+        LyricSkia.setCanvas(canvas);
+
+        float sigma = Math.max(1f, LyricConfig.instance.lyricFontSize.getValue() * EDGE_BLUR_SIGMA_RATIO);
+        float rx = bw / (float) sw;
+        float ry = bh / (float) sh;
+        ensureHalfResBlurFilter(Math.max(0.4f, sigma * outerSx * rx), Math.max(0.4f, sigma * outerSy * ry));
+        computeBandStops(colTopY, colH, lyricRenderer.litBandBounds(), bandStops);
+
+        try (Image sharpImg = columnSurface.makeImageSnapshot()) {
+            Canvas bc = columnBlurSurface.getCanvas();
+            bc.clear(0);
+            columnBlurPaint.setImageFilter(halfResBlurFilter);
+            bc.drawImageRect(sharpImg, columnSrcRect, columnBlurRect, SamplingMode.LINEAR,
+                    columnBlurPaint, true);
+            columnBlurPaint.setImageFilter(null);
+
+            try (Image blurImg = columnBlurSurface.makeImageSnapshot();
+                 Shader sharpShader = sharpImg.makeShader(
+                         FilterTileMode.DECAL, FilterTileMode.DECAL, SamplingMode.DEFAULT, null);
+                 Shader blurShader = blurImg.makeShader(
+                         FilterTileMode.DECAL, FilterTileMode.DECAL, SamplingMode.LINEAR, null)) {
+                if (edgeBlurCompositeBuilder == null) {
+                    edgeBlurCompositeBuilder = new RuntimeEffectBuilder(effect);
+                }
+                edgeBlurCompositeBuilder.setChild("sharpTex", sharpShader);
+                edgeBlurCompositeBuilder.setChild("blurTex", blurShader);
+                edgeBlurCompositeBuilder.setUniform("colTopY", colTopY);
+                edgeBlurCompositeBuilder.setUniform("colHeight", Math.max(1f, colH));
+                edgeBlurCompositeBuilder.setUniform("devOrigin", (float) columnDevL, (float) columnDevT);
+                edgeBlurCompositeBuilder.setUniform("ctmScale", outerSx, outerSy);
+                edgeBlurCompositeBuilder.setUniform("ctmTrans", outerTx, outerTy);
+                edgeBlurCompositeBuilder.setUniform("blurRatio", rx, ry);
+                edgeBlurCompositeBuilder.setUniform("bandStops",
+                        bandStops[0], bandStops[1], bandStops[2], bandStops[3]);
+                edgeBlurCompositeBuilder.setUniform("fadeFrac",
+                        colH > 0f ? Math.min(0.4f, 40f / colH) : 0f);
+                edgeBlurCompositeBuilder.setUniform("overallAlpha", overallAlpha);
+                try (Shader composite = edgeBlurCompositeBuilder.makeShader()) {
+                    edgeBlurCompositePaint.setShader(composite);
+                    canvas.drawRect(colRect, edgeBlurCompositePaint);
+                } finally {
+                    edgeBlurCompositePaint.setShader(null);
+                }
+            }
+        }
+        return true;
     }
 
     // Progressive edge blur: one render of the column into an offscreen GPU surface,
@@ -1210,6 +1404,45 @@ public final class LyricCompositor {
         }
         columnSurfaceW = -1;
         columnSurfaceH = -1;
+        closeColumnBlurSurface();
+    }
+
+    private void closeColumnBlurSurface() {
+        if (columnBlurSurface != null) {
+            columnBlurSurface.close();
+            columnBlurSurface = null;
+        }
+        columnBlurW = -1;
+        columnBlurH = -1;
+        if (halfResBlurFilter != null) {
+            halfResBlurFilter.close();
+            halfResBlurFilter = null;
+        }
+        halfResBlurSigmaX = -1f;
+        halfResBlurSigmaY = -1f;
+    }
+
+    private void ensureHalfResBlurFilter(float sx, float sy) {
+        float qx = Math.round(sx * 20f) / 20f;
+        float qy = Math.round(sy * 20f) / 20f;
+        if (halfResBlurFilter != null && qx == halfResBlurSigmaX && qy == halfResBlurSigmaY) return;
+        if (halfResBlurFilter != null) halfResBlurFilter.close();
+        halfResBlurSigmaX = qx;
+        halfResBlurSigmaY = qy;
+        halfResBlurFilter = ImageFilter.makeBlur(qx, qy, FilterTileMode.DECAL);
+    }
+
+    private static void computeBandStops(float topY, float colH, float[] lit, float[] out) {
+        float fTop, fBot;
+        if (lit != null && colH > 0f) {
+            fTop = (lit[0] - topY) / colH;
+            fBot = (lit[1] - topY) / colH;
+            if (fBot < fTop) { float m = fTop; fTop = fBot; fBot = m; }
+        } else {
+            fTop = BAND_STOPS[1];
+            fBot = BAND_STOPS[2];
+        }
+        monotonic(out, fTop - BAND_RAMP, fTop, fBot, fBot + BAND_RAMP);
     }
 
     /** Free the graphics caches this page owns while it is closed. Called from the
@@ -1280,7 +1513,7 @@ public final class LyricCompositor {
         bandFracBottom = fBot;
         if (blurBandShader != null) blurBandShader.close();
         if (sharpBandShader != null) sharpBandShader.close();
-        monotonic(bandStops, fTop - BAND_RAMP, fTop, fBot, fBot + BAND_RAMP);
+        computeBandStops(topY, colH, lit, bandStops);
         int o = 0xFFFFFFFF, t = 0x00FFFFFF;
         blurBandColors[0] = o; blurBandColors[1] = t;
         blurBandColors[2] = t; blurBandColors[3] = o;
@@ -1325,6 +1558,13 @@ public final class LyricCompositor {
     public void onSceneReloaded() {
         temperaChrome = null;
         lyricChrome = null;
+        miniPlayerItem = null;
+        miniLgProp = null;
+        miniRadiusProp = null;
+        miniColorProp = null;
+        miniLgSurfaceColorProp = null;
+        lastMiniColorRaw = null;
+        cachedMiniColor = 0;
         fullscreenExitIndicator = null;
         for (int i = 0; i < liquidGlass.length; i++) {
             liquidGlass[i] = null;
@@ -1332,12 +1572,20 @@ public final class LyricCompositor {
         }
         chromeLookupDone = false;
         liquidGlassActive = false;
+        compositorGpuPrewarmed = false;
+        fluidGpuPrewarmed = false;
         renderedVersion = -1;
     }
 
     /** Release context-bound caches before the host destroys its GPU context. */
     public void invalidateGpuContext() {
         closeColumnSurface();
+        if (edgeBlurCompositeBuilder != null) {
+            edgeBlurCompositeBuilder.close();
+            edgeBlurCompositeBuilder = null;
+        }
+        compositorGpuPrewarmed = false;
+        fluidGpuPrewarmed = false;
         temperaPage.releaseResources();
         fluidBg.invalidateGpuContext();
         for (LiquidGlassNode node : liquidGlass) {

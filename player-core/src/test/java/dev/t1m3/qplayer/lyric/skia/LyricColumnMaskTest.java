@@ -58,4 +58,74 @@ public class LyricColumnMaskTest {
             compositor.dispose();
         }
     }
+
+    @Test
+    public void edgeBlurCompositeShaderCompilesAndBlendsFocusBand() throws Exception {
+        String source;
+        try (java.io.InputStream in = LyricCompositor.class.getResourceAsStream(
+                "/shaders/lyric/edge_blur_composite.sksl")) {
+            assertTrue("edge_blur_composite.sksl resource missing", in != null);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[2048];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            source = new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        try (io.github.humbleui.skija.RuntimeEffect effect =
+                     io.github.humbleui.skija.RuntimeEffect.makeForShader(source);
+             Surface sharpSurf = Surface.makeRasterN32Premul(100, 100);
+             Surface blurSurf = Surface.makeRasterN32Premul(50, 50);
+             Surface outSurf = Surface.makeRasterN32Premul(100, 100);
+             Paint white = new Paint().setColor(0xFFFFFFFF);
+             Paint green = new Paint().setColor(0xFF00FF00);
+             Paint compositePaint = new Paint();
+             Bitmap pixels = new Bitmap()) {
+            sharpSurf.getCanvas().clear(0xFFFFFFFF);
+            blurSurf.getCanvas().clear(0xFF00FF00);
+            try (io.github.humbleui.skija.Image sharpImg = sharpSurf.makeImageSnapshot();
+                 io.github.humbleui.skija.Image blurImg = blurSurf.makeImageSnapshot();
+                 Shader sharpShader = sharpImg.makeShader(
+                         io.github.humbleui.skija.FilterTileMode.DECAL,
+                         io.github.humbleui.skija.FilterTileMode.DECAL,
+                         io.github.humbleui.skija.SamplingMode.DEFAULT, null);
+                 Shader blurShader = blurImg.makeShader(
+                         io.github.humbleui.skija.FilterTileMode.DECAL,
+                         io.github.humbleui.skija.FilterTileMode.DECAL,
+                         io.github.humbleui.skija.SamplingMode.LINEAR, null);
+                 io.github.humbleui.skija.RuntimeEffectBuilder builder =
+                         new io.github.humbleui.skija.RuntimeEffectBuilder(effect)) {
+                builder.setChild("sharpTex", sharpShader);
+                builder.setChild("blurTex", blurShader);
+                builder.setUniform("colTopY", 0f);
+                builder.setUniform("colHeight", 100f);
+                builder.setUniform("devOrigin", 0f, 0f);
+                builder.setUniform("ctmScale", 1f, 1f);
+                builder.setUniform("ctmTrans", 0f, 0f);
+                builder.setUniform("blurRatio", 0.5f, 0.5f);
+                builder.setUniform("bandStops", 0.15f, 0.35f, 0.65f, 0.85f);
+                builder.setUniform("fadeFrac", 0.1f);
+                builder.setUniform("overallAlpha", 1.0f);
+                try (Shader compiled = builder.makeShader()) {
+                    compositePaint.setShader(compiled);
+                    outSurf.getCanvas().clear(0);
+                    outSurf.getCanvas().drawRect(Rect.makeWH(100, 100), compositePaint);
+                }
+            }
+            pixels.allocN32Pixels(100, 100);
+            assertTrue(outSurf.readPixels(pixels, 0, 0));
+            // Top & bottom edge rows (pixel center y=0.5 / 99.5, t=0.005/0.995 -> alpha <= 15).
+            assertTrue((pixels.getColor(50, 0) >>> 24) <= 15);
+            assertTrue((pixels.getColor(50, 99) >>> 24) <= 15);
+            // Blur band outside the sharp focus band (y=12, t=0.125): pure green.
+            assertEquals(0xFF00FF00, pixels.getColor(50, 12));
+            // Inside sharp plateau (y=50, t=0.505): pure white.
+            assertEquals(0xFFFFFFFF, pixels.getColor(50, 50));
+            // Ramp between blur and sharp (y=25, t=0.255 -> sharpW ≈ 0.525): blended green+white.
+            int rampPx = pixels.getColor(50, 25);
+            assertEquals(255, (rampPx >>> 8) & 0xFF);
+            int rampRed = (rampPx >>> 16) & 0xFF;
+            assertTrue("expected ramp red between 100 and 160, got " + rampRed,
+                    rampRed >= 100 && rampRed <= 160);
+        }
+    }
 }

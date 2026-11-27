@@ -48,29 +48,6 @@ import java.util.function.Consumer;
  */
 public final class QPlayerActivity extends Activity {
 
-    static {
-        // Same Skija JNI bring-up as the qml4j demo: we ship the .so via
-        // jniLibs and bypass the auto-loader, so _nAfterLoad() must run
-        // explicitly or every object-returning native call crashes.
-        System.setProperty("skija.staticLoad", "false");
-        System.loadLibrary("skija");
-        io.github.humbleui.skija.impl.Library._nAfterLoad();
-        try {
-            Class.forName("io.github.humbleui.skija.ImageInfo");
-            Class.forName("io.github.humbleui.skija.ColorInfo");
-            Class.forName("io.github.humbleui.skija.ColorSpace");
-            Class.forName("io.github.humbleui.skija.Color4f");
-            Class.forName("io.github.humbleui.skija.Image");
-            Class.forName("io.github.humbleui.skija.Canvas");
-            Class.forName("io.github.humbleui.skija.Paint");
-            Class.forName("io.github.humbleui.skija.Font");
-            Class.forName("io.github.humbleui.types.Rect");
-            Class.forName("io.github.humbleui.types.IRect");
-        } catch (ClassNotFoundException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     private static final int REQ_AUDIO = 1;
     private static final int REQ_NOTIF = 2;
     private static final int REQ_COVER_PICK = 3;
@@ -111,6 +88,8 @@ public final class QPlayerActivity extends Activity {
     private EngineState scene;
     private boolean reusedScene;
     private boolean resumed;
+    private long activityCreateNanos;
+    private boolean customFontEarlyScan;
 
     /** Caches the process controller across Activity recreations, and waits for
      * full old-engine termination before creating a replacement. */
@@ -128,6 +107,7 @@ public final class QPlayerActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        activityCreateNanos = System.nanoTime();
         super.onCreate(savedInstanceState);
         logSceneLifecycle("create");
         activeUiToken = uiToken;
@@ -146,7 +126,7 @@ public final class QPlayerActivity extends Activity {
         enableEdgeToEdge();
         attachInsetListener(root);
         if (retained != null) attachEngine(retained);
-        else splashView.post(this::startEngine);
+        else startEngine();
     }
 
     private void startEngine() {
@@ -156,13 +136,8 @@ public final class QPlayerActivity extends Activity {
         android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
         java.util.concurrent.CompletableFuture<PlayerController> initialization =
                 ENGINE.getOrStart(() -> {
+                    dev.t1m3.qplayer.android.app.SkijaLoader.ensureLoaded();
                     dev.t1m3.qplayer.store.AppDirs.migrateLegacyLayout();
-                    java.io.File updates = new java.io.File(app.getExternalFilesDir(null), "updates");
-                    dev.t1m3.qplayer.util.Logger.info("updates cache: {} bytes before sweep",
-                            dirSizeBytes(updates));
-                    deleteRecursive(updates);
-                    deleteRecursive(dev.t1m3.qplayer.store.AppDirs.cacheDir()
-                            .resolve("plugin-imports").toFile());
                     try {
                         dev.t1m3.qplayer.plugin.PluginCompatibility.setHostVersion(
                                 app.getPackageManager().getPackageInfo(app.getPackageName(), 0).versionName);
@@ -177,7 +152,7 @@ public final class QPlayerActivity extends Activity {
                 SettingsCore preparedSettings = new SettingsCore();
                 preparedSettings.attach(c);
                 preparedSettings.setSystemDark(isSystemDark(app));
-                preparedSettings.load(new PrefsSettingsStore(app), SettingsCatalog.ANDROID);
+                preparedSettings.load(new PrefsSettingsStore(app), SettingsCatalog.ANDROID, true);
                 return new EngineState(c, preparedSettings);
             }
         }, ENGINE_IO).whenComplete((state, error) -> main.post(() -> {
@@ -356,21 +331,20 @@ public final class QPlayerActivity extends Activity {
 
 
         // Learning a font file's family name means parsing it, so the ~200 files
-        // on a device are indexed off the main thread and the picker's list is
-        // republished when that finishes. Started here rather than in
-        // Application.onCreate because it needs Skija's natives, which the
-        // Activity has just brought up.
-        if (!reusedScene) AndroidFontIndex.instance().scanAsync(() -> runOnUiThread(() -> {
-            QmlGLSurfaceView view = glView;
-            SettingsCore s = settings;
-            if (destroyed || view == null || s == null) return;
-            view.queueEvent(() -> {
-                // A font only the index knows about was unresolvable when the
-                // selection was first applied; resolve it again now.
-                dev.t1m3.qplayer.lyric.skia.Fonts.reloadFileIndex();
-                s.refreshFontFamilies();
-            });
-        }));
+        // on a device are indexed off the main thread. When the user actually
+        // selected a non-bundled font, start immediately so QmlGLSurfaceView can
+        // resolve it; for the bundled font default, defer until after onSceneReady()
+        // so parsing 200+ system fonts does not contend with cold-start frame 1.
+        customFontEarlyScan = !reusedScene && !settings.fontSelectionOf("").isEmpty();
+        if (customFontEarlyScan) {
+            startFontIndexScan();
+        }
+
+        dev.t1m3.qplayer.android.app.SkijaLoader.ensureLoaded();
+        if (activityCreateNanos > 0L && !reusedScene) {
+            android.util.Log.i("qplayer.startup", "engineReady elapsed="
+                    + ((System.nanoTime() - activityCreateNanos) / 1_000_000L) + "ms");
+        }
 
         float density = getResources().getDisplayMetrics().density;
         // QML is authored in dp and qml4j does not scale Image.sourceSize by the
@@ -420,23 +394,41 @@ public final class QPlayerActivity extends Activity {
         settings.onChange(key, hook);
     }
 
+    private void startFontIndexScan() {
+        AndroidFontIndex.instance().scanAsync(() -> runOnUiThread(() -> {
+            QmlGLSurfaceView view = glView;
+            SettingsCore s = settings;
+            if (destroyed || view == null || s == null) return;
+            view.queueEvent(() -> {
+                // A font only the index knows about was unresolvable when the
+                // selection was first applied; resolve it again now.
+                dev.t1m3.qplayer.lyric.skia.Fonts.reloadFileIndex();
+                s.refreshFontFamilies();
+            });
+        }));
+    }
+
     private static void initializeLyricFonts(Context app) {
         DiskDecompressedResourceCache resources =
                 ((dev.t1m3.qplayer.android.app.QPlayerApplication) app).sceneResources();
-        try {
-            if (!lyricFontsInitialized) {
-                dev.t1m3.qplayer.lyric.skia.Fonts.init(weight -> CompressedResources.load(resources,
-                        "fonts/PingFangSC-" + bundledFontWeightName(weight) + ".otf"));
-                dev.t1m3.qplayer.lyric.skia.Fonts.initIcon(
-                        readAssetBytes(app, "fonts/MaterialSymbolsRounded.ttf"));
-                dev.t1m3.qplayer.lyric.skia.Fonts.addFileIndex(AndroidFontIndex.instance());
-                dev.t1m3.qplayer.lyric.skia.Fonts.addFileIndex(
-                        dev.t1m3.qplayer.lyric.skia.ImportedFonts.instance());
-                lyricFontsInitialized = true;
+        if (!lyricFontsInitialized) {
+            dev.t1m3.qplayer.lyric.skia.Fonts.init(weight -> CompressedResources.load(resources,
+                    "fonts/PingFangSC-" + bundledFontWeightName(weight) + ".otf"));
+            byte[] iconBytes = resources.load("fonts/MaterialSymbolsRounded.ttf");
+            if (iconBytes != null) {
+                dev.t1m3.qplayer.lyric.skia.Fonts.initIcon(iconBytes);
+            } else {
+                try {
+                    dev.t1m3.qplayer.lyric.skia.Fonts.initIcon(
+                            readAssetBytes(app, "fonts/MaterialSymbolsRounded.ttf"));
+                } catch (IOException error) {
+                    throw new java.util.concurrent.CompletionException(error);
+                }
             }
-            dev.t1m3.qplayer.lyric.skia.Fonts.warmupFromConfig();
-        } catch (IOException error) {
-            throw new java.util.concurrent.CompletionException(error);
+            dev.t1m3.qplayer.lyric.skia.Fonts.addFileIndex(AndroidFontIndex.instance());
+            dev.t1m3.qplayer.lyric.skia.Fonts.addFileIndex(
+                    dev.t1m3.qplayer.lyric.skia.ImportedFonts.instance());
+            lyricFontsInitialized = true;
         }
     }
 
@@ -639,10 +631,35 @@ public final class QPlayerActivity extends Activity {
      *  splash and request the audio permission (and scan) — see onCreate. */
     private void onSceneReady() {
         if (destroyed || activeUiToken != uiToken || glView == null) return;
+        long nowNs = System.nanoTime();
+        long procNs = dev.t1m3.qplayer.android.app.QPlayerApplication.processCreateNanos();
+        long fromProcMs = procNs > 0L ? (nowNs - procNs) / 1_000_000L : -1L;
+        long fromActMs = activityCreateNanos > 0L ? (nowNs - activityCreateNanos) / 1_000_000L : -1L;
+        android.util.Log.i("qplayer.startup", "sceneReady reused=" + reusedScene
+                + " fromProcessMs=" + fromProcMs + " fromActivityMs=" + fromActMs);
         logSceneLifecycle("ready reused=" + reusedScene
                 + " scene=" + Integer.toHexString(glView.sceneIdentity()));
         hideSplash();
         if (reusedScene) return;
+        final Context app = getApplicationContext();
+        dev.t1m3.qplayer.android.app.QPlayerApplication.startupExecutor().execute(() -> {
+            java.io.File updates = new java.io.File(app.getExternalFilesDir(null), "updates");
+            dev.t1m3.qplayer.util.Logger.info("updates cache: {} bytes before sweep",
+                    dirSizeBytes(updates));
+            deleteRecursive(updates);
+            deleteRecursive(dev.t1m3.qplayer.store.AppDirs.cacheDir()
+                    .resolve("plugin-imports").toFile());
+        });
+        if (mainHandler != null) {
+            mainHandler.postDelayed(() -> {
+                if (!destroyed) dev.t1m3.qplayer.lyric.skia.Fonts.warmupFromConfig();
+            }, 350L);
+            if (!customFontEarlyScan) {
+                mainHandler.postDelayed(() -> {
+                    if (!destroyed) startFontIndexScan();
+                }, 500L);
+            }
+        }
         requestAudioPermission();
         requestNotificationPermission();
         // Don't auto-check for app updates on debug builds — only release builds nag.
@@ -723,10 +740,12 @@ public final class QPlayerActivity extends Activity {
         if (splashView == null) return;
         final android.view.View v = splashView;
         splashView = null;
-        v.animate().alpha(0f).setDuration(280).withEndAction(() -> {
-            android.view.ViewParent p = v.getParent();
-            if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
-        }).start();
+        v.animate().alpha(0f).setDuration(150)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .withEndAction(() -> {
+                    android.view.ViewParent p = v.getParent();
+                    if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
+                }).start();
     }
 
     private void requestAudioPermission() {

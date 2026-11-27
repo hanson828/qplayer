@@ -147,6 +147,23 @@ public class PluginRuntimeTest {
     }
 
     @Test
+    public void detectsBackgroundTickAvailabilitySynchronouslyAtStartup() throws Exception {
+        Files.write(temporary.getRoot().toPath().resolve("main.js"), (
+                "module.exports = { handlers: { backgroundTick: function() {} } };\n")
+                .getBytes(StandardCharsets.UTF_8));
+        try (PluginRuntime withTick = PluginRuntime.start(
+                temporary.getRoot().toPath(), manifest(), noOpHost())) {
+            assertEquals(true, withTick.hasBackgroundTick());
+        }
+        Files.write(temporary.getRoot().toPath().resolve("main.js"), (
+                "module.exports = { handlers: {} };\n").getBytes(StandardCharsets.UTF_8));
+        try (PluginRuntime withoutTick = PluginRuntime.start(
+                temporary.getRoot().toPath(), manifest(), noOpHost())) {
+            assertEquals(false, withoutTick.hasBackgroundTick());
+        }
+    }
+
+    @Test
     public void rejectsAdvertisedCapabilitiesWithoutHandlers() throws Exception {
         Files.write(temporary.getRoot().toPath().resolve("main.js"),
                 "module.exports = { handlers: {} };\n".getBytes(StandardCharsets.UTF_8));

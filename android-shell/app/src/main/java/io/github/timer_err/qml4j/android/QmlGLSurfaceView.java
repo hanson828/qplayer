@@ -3,6 +3,8 @@ package io.github.timer_err.qml4j.android;
 import android.app.Activity;
 import android.content.Context;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.opengl.GLSurfaceView;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -39,12 +41,14 @@ import dev.t1m3.qplayer.settings.SettingsCore;
 import dev.t1m3.qplayer.lyric.skia.LyricCompositor;
 import dev.t1m3.qplayer.lyric.skia.LyricConfig;
 import dev.t1m3.qplayer.resources.CompressedResources;
+import dev.t1m3.qplayer.resources.DiskDecompressedResourceCache;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.microedition.khronos.egl.EGLConfig;
@@ -81,6 +85,16 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
     private static final int WAKE_SETTLE_FRAMES = 2;
     private final AtomicInteger wakeSettleFrames = new AtomicInteger();
     private final Runnable renderWake = this::wakeRenderer;
+    private volatile int currentRenderMode = -1;
+    private final Handler tickHandler = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean playbackTickScheduled = new AtomicBoolean();
+    private final Runnable playbackTickRunnable = () -> {
+        playbackTickScheduled.set(false);
+        if (!disposed && !pauseRequested && !gpuPaused && !glThreadPaused
+                && !glThreadDetached && host.get() != null) {
+            requestRender();
+        }
+    };
 
     /** One-shot ready signal on the GL thread after the first painted frame. */
     public interface SplashListener {
@@ -148,9 +162,27 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
         // Canvas/fluid GPU caches first, so they rebuild cleanly on resume.
         setPreserveEGLContextOnPause(false);
         setRenderer(new GlRenderer());
-        setRenderMode(RENDERMODE_CONTINUOUSLY);
+        applyRenderMode(RENDERMODE_CONTINUOUSLY);
         setFocusable(true);
         setFocusableInTouchMode(true);
+    }
+
+    private void applyRenderMode(int mode) {
+        if (currentRenderMode == mode) return;
+        currentRenderMode = mode;
+        super.setRenderMode(mode);
+    }
+
+    private void schedulePlaybackTick(long delayMs) {
+        if (playbackTickScheduled.compareAndSet(false, true)) {
+            tickHandler.postDelayed(playbackTickRunnable, Math.max(16L, delayMs));
+        }
+    }
+
+    private void cancelPlaybackTick() {
+        if (playbackTickScheduled.getAndSet(false)) {
+            tickHandler.removeCallbacks(playbackTickRunnable);
+        }
     }
 
     /** Apply the interface zoom setting; the next frame relayouts at the new scale. */
@@ -176,6 +208,7 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
 
     /** Drop window ownership, but retain the loaded QML tree and CPU-side caches. */
     public void detachHost() {
+        cancelPlaybackTick();
         liquidGlassTilt.onPause();
         synchronized (QmlRuntimeLock.MONITOR) {
             host.clear();
@@ -208,6 +241,7 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
 
     private void pauseGlThread() {
         gpuPaused = true;
+        cancelPlaybackTick();
         runOnGlThreadAndWait(() -> {
             if (resourcesReleased) return;
             cancelPendingInput();
@@ -554,8 +588,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
      *  updates QML state but never draws — the screen looks frozen until Home
      *  or Back (which do post() and wake). */
     private void wakeRenderer() {
+        cancelPlaybackTick();
         wakeSettleFrames.updateAndGet(current -> Math.max(current, WAKE_SETTLE_FRAMES));
-        setRenderMode(RENDERMODE_CONTINUOUSLY);
+        applyRenderMode(RENDERMODE_CONTINUOUSLY);
         requestRender();
     }
 
@@ -783,6 +818,7 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
 
         private void surfaceChanged(int width, int height) {
             if (failed || disposed || surface == null) return;
+            dev.t1m3.qplayer.android.app.SkijaLoader.ensureLoaded();
             surface.resize(width, height);
             try {
                 if (view == null) {
@@ -833,6 +869,9 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                     if (reg != null || med != null) view.uiTypefaces(reg, med);
                     byte[] iconFont = resources.load("fonts/MaterialSymbolsRounded.ttf");
                     if (iconFont != null) view.iconTypeface(iconFont);
+                    if (resources instanceof DiskDecompressedResourceCache) {
+                        ((DiskDecompressedResourceCache) resources).releasePrewarmed();
+                    }
                     bundle.load(view);
                     rootIdentity = System.identityHashCode(view.root());
                     sceneLoaded = true;
@@ -884,21 +923,28 @@ public final class QmlGLSurfaceView extends GLSurfaceView {
                 long t1b = System.nanoTime();
                 surface.present();
                 profileFrame(t0, t1, t1b, System.nanoTime());
-                boolean hostAnimation = compositor.liquidGlassAnimating() || (controller != null && (
-                        controller.isPlaying()
-                        || compositor.temperaVisible(controller)
+                boolean lyricOrTemperaActive = controller != null && (
+                        compositor.temperaVisible(controller)
                         || Boolean.TRUE.equals(controller.lyricsOpen.peek())
                         || (controller.lyricSlide.peek() != null
-                            && controller.lyricSlide.peek() > 0.001)));
+                            && controller.lyricSlide.peek() > 0.001));
+                boolean playbackFadeActive = controller != null && controller.isFadeActive();
+                boolean hostAnimation = compositor.liquidGlassAnimating()
+                        || lyricOrTemperaActive
+                        || playbackFadeActive;
                 // Don't force-cap frame rate to 60Hz on high-refresh panels (e.g. 120Hz).
                 // Mode switching causes display stutter (50-60ms SurfaceFlinger hitch)
                 // during the lyric page slide transition.
                 boolean needContinuous = AndroidRenderPolicy.shouldRenderContinuously(
                         hostAnimation, frameChanges > 0, consumeWakeSettleFrame(), view.root());
                 if (!needContinuous && compositor.skippedLayout()) {
-                    setRenderMode(RENDERMODE_WHEN_DIRTY);
+                    applyRenderMode(RENDERMODE_WHEN_DIRTY);
+                    if (controller != null && controller.isPlaying()) {
+                        schedulePlaybackTick(controller.msUntilNextPositionPush() + 4L);
+                    }
                 } else {
-                    setRenderMode(RENDERMODE_CONTINUOUSLY);
+                    cancelPlaybackTick();
+                    applyRenderMode(RENDERMODE_CONTINUOUSLY);
                 }
                 if (!readyFired && host.get() != null
                         && surfaceHostGeneration == hostGeneration) {

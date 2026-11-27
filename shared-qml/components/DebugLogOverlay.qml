@@ -8,43 +8,55 @@ import "."
 Rectangle {
     id: overlay
     signal closeRequested()
+    property bool _everShown: overlay.visible
+    onVisibleChanged: if (overlay.visible) overlay._everShown = true
     color: Ui.background
 
-    // Swallow pointer input so nothing underneath reacts while the log is open.
-    MouseArea { anchors.fill: parent }
+    Loader {
+        anchors.fill: parent
+        active: overlay._everShown
+        sourceComponent: Component {
+            Item {
+                anchors.fill: parent
 
-    RouteHeader {
-        id: header
-        x: 0
-        y: settings.topInset
-        width: parent.width
-        title: i18n.t("log.title")
-        elevated: logScroller.contentY > 1
-        onBack: overlay.closeRequested()
-        IconButton {
-            objectName: "debugLogClear"
-            type: "standard"
-            icon: "delete"
-            onClicked: player.clearLog()
-        }
-    }
+                // Swallow pointer input so nothing underneath reacts while the log is open.
+                MouseArea { anchors.fill: parent }
 
-    Flickable {
-        id: logScroller
-        x: Ui.gutter(overlay.width)
-        y: header.y + header.height
-        width: overlay.width - 2 * x
-        height: overlay.height - y - settings.bottomInset
-        clip: true
-        contentHeight: logText.height + 24
-        Text {
-            id: logText
-            width: logScroller.width
-            text: player.logText
-            color: Ui.textSecondary
-            font.pixelSize: Ui.textCaption
-            wrapMode: Text.WrapAnywhere
+                RouteHeader {
+                    id: header
+                    x: 0
+                    y: settings.topInset
+                    width: parent.width
+                    title: i18n.t("log.title")
+                    elevated: logScroller.contentY > 1
+                    onBack: overlay.closeRequested()
+                    IconButton {
+                        objectName: "debugLogClear"
+                        type: "standard"
+                        icon: "delete"
+                        onClicked: player.clearLog()
+                    }
+                }
+
+                Flickable {
+                    id: logScroller
+                    x: Ui.gutter(overlay.width)
+                    y: header.y + header.height
+                    width: overlay.width - 2 * x
+                    height: overlay.height - y - settings.bottomInset
+                    clip: true
+                    contentHeight: logText.height + 24
+                    Text {
+                        id: logText
+                        width: logScroller.width
+                        text: player.logText
+                        color: Ui.textSecondary
+                        font.pixelSize: Ui.textCaption
+                        wrapMode: Text.WrapAnywhere
+                    }
+                    ViewportScrollBar { target: logScroller }
+                }
+            }
         }
-        ViewportScrollBar { target: logScroller }
     }
 }
