@@ -564,6 +564,16 @@ public final class SettingsCatalog {
                 .onlyOn(DESKTOP)
                 .group("folders")
                 .build());
+        out.add(SettingSpec.action("exportSettings", LOCAL, "settings.exportSettings.title", "")
+                .desc("settings.exportSettings.desc")
+                .icon("upload_file")
+                .group("backup")
+                .build());
+        out.add(SettingSpec.action("importSettings", LOCAL, "settings.importSettings.title", "")
+                .desc("settings.importSettings.desc")
+                .icon("download")
+                .group("backup")
+                .build());
 
         // ---- 关于 -----------------------------------------------------------
         // GitHub mirror used to sit under 播放 even though it only accelerates

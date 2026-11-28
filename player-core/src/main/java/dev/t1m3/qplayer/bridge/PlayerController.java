@@ -885,7 +885,7 @@ public final class PlayerController {
      *  request was already running and could surface tens of seconds late (a
      *  15s connect + 30s read timeout is the worst case) — long after whatever
      *  the user did to trigger it. It also no longer blocks a thread to wait. */
-    private void showToast(String msg) {
+    public void showToast(String msg) {
         post(() -> toast.set(""));
         try {
             fadeWorker.schedule(() -> post(() -> toast.set(msg)), 30, TimeUnit.MILLISECONDS);
@@ -7346,6 +7346,34 @@ public final class PlayerController {
                     AppDirs.stateFile("lyric-offsets.json"), root.toString());
         } catch (Throwable e) {
             Logger.warn("save lyric offsets failed: {}", e.getMessage());
+        }
+    }
+
+    /** Copy of all persisted track lyric offsets for settings export. */
+    public Map<String, Integer> getLyricOffsets() {
+        synchronized (lyricOffsets) {
+            return new HashMap<>(lyricOffsets);
+        }
+    }
+
+    /** Merge imported track lyric offsets (clamped to [-5000, 5000] ms) and persist asynchronously. */
+    public void importLyricOffsets(Map<String, Integer> offsets) {
+        if (offsets == null || offsets.isEmpty()) return;
+        boolean changed = false;
+        synchronized (lyricOffsets) {
+            for (Map.Entry<String, Integer> entry : offsets.entrySet()) {
+                String canonical = canonicalLyricOffsetKey(entry.getKey());
+                if (!canonical.isEmpty() && entry.getValue() != null) {
+                    int clamped = Math.max(-5000, Math.min(5000, entry.getValue()));
+                    if (clamped != 0) {
+                        lyricOffsets.put(canonical, clamped);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if (changed) {
+            worker.submit(this::saveLyricOffsets);
         }
     }
 

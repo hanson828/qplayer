@@ -196,4 +196,18 @@ Rectangle {
     }
 
     ColorPickerDialog { objectName: "settingsColorPicker" }
+
+    ExportConfigDialog {
+        objectName: "settingsExportConfigDialog"
+        active: settings.exportConfigOpen
+        onClosed: settings.exportConfigOpen = false
+        onExportEncrypted: settings.invoke("exportEncryptedSettings")
+        onExportPlain: settings.invoke("exportPlainSettings")
+    }
+
+    ImportConfigPasswordDialog {
+        objectName: "settingsImportPasswordDialog"
+        active: settings.importPasswordOpen
+        onClosed: settings.importPasswordOpen = false
+    }
 }

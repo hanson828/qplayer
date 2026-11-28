@@ -199,6 +199,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
         specs = Collections.unmodifiableList(specs);
         availableFontFamilies.set(sortedFontFamilies());
         registerFontProviders();
+        actions.putIfAbsent("exportSettings", () -> exportConfigOpen.set(Boolean.TRUE));
         loaded = true;
         applyAll();
     }
@@ -349,6 +350,26 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     private Object peek(String key) {
         Property<Object> p = values.get(key);
         return p != null ? p.peek() : null;
+    }
+
+    public Object raw(String key) {
+        return peek(key);
+    }
+
+    public boolean hasSpec(String key) {
+        return specsByKey.containsKey(key);
+    }
+
+    public SettingSpec specOf(String key) {
+        return specsByKey.get(key);
+    }
+
+    public String desktopLyricFontSelection() {
+        return fontSelectionOf(DESKTOP_LYRIC_FONT_KEY);
+    }
+
+    public void setDesktopLyricFontSelection(String family) {
+        setFontSelectionFor(DESKTOP_LYRIC_FONT_KEY, family);
     }
 
     // ---- dark mode ----------------------------------------------------------
@@ -653,6 +674,32 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     /** Key of the COLOR row whose picker dialog is open, empty when none is. One
      *  dialog serves every colour row, the same way one dialog serves both fonts. */
     public final Property<String> colorPickerKey = new Property<>("");
+    /** Dialog flag to present encrypted and plain export choices together. */
+    public final Property<Boolean> exportConfigOpen = new Property<>(Boolean.FALSE);
+    /** Dialog flag + error text when importing an encrypted configuration file. */
+    public final Property<Boolean> importPasswordOpen = new Property<>(Boolean.FALSE);
+    public final Property<String> importPasswordError = new Property<>("");
+    private char[] transferPassphrase;
+
+    public void setTransferPassphrase(String passphrase) {
+        clearTransferPassphrase();
+        if (passphrase != null && !passphrase.isEmpty()) {
+            transferPassphrase = passphrase.toCharArray();
+        }
+    }
+
+    public char[] consumeTransferPassphrase() {
+        char[] copy = transferPassphrase;
+        transferPassphrase = null;
+        return copy;
+    }
+
+    private void clearTransferPassphrase() {
+        if (transferPassphrase != null) {
+            java.util.Arrays.fill(transferPassphrase, '\0');
+            transferPassphrase = null;
+        }
+    }
 
     /** Reactive current-font readout for the picker dialog and the 外观 row. */
     public String fontFamily() {
