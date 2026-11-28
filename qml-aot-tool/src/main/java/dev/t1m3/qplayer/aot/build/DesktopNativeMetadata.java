@@ -118,6 +118,7 @@ public final class DesktopNativeMetadata {
                 "cache.PlaylistCacheIndex$Cached", "library.LibraryCache$Index", "library.LibraryCache$Entry",
                 "playlist.LocalPlaylistStore$State", "playlist.MyPlaylistOrderStore$State",
                 "playlist.PlaylistTransfer$Document", "playlist.PlaylistTransfer$SourceSummary",
+                "settings.SettingsTransfer$Document", "settings.SettingsTransfer$EncryptedDocument",
                 "plugin.CorePluginHostApi$StoredValue", "plugin.PluginInstaller$Receipt",
                 "plugin.PluginManager$InstallReceipt", "plugin.PluginRegistry$State", "plugin.PluginRegistry$Entry",
                 "plugin.PluginSetupState$State", "plugin.PluginManifest", "plugin.PluginManifest$UiContribution",

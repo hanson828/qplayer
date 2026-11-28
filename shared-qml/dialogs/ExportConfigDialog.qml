@@ -7,13 +7,30 @@ Item {
     id: control
     anchors.fill: parent
     property bool active: false
+    property bool enteringPassword: false
+    property string passwordText: ""
     signal closed()
     signal exportEncrypted()
     signal exportPlain()
 
     onActiveChanged: {
-        if (active) dialog.open()
-        else if (dialog.opened) dialog.close()
+        if (active) {
+            control.enteringPassword = false
+            control.passwordText = ""
+            dialog.open()
+        } else if (dialog.opened) {
+            dialog.close()
+        }
+    }
+
+    function submitEncrypted() {
+        var pwd = control.passwordText
+        if (!pwd || pwd.length === 0) return
+        settings.setTransferPassphrase(pwd)
+        control.passwordText = ""
+        control.enteringPassword = false
+        dialog.close()
+        control.exportEncrypted()
     }
 
     Dialog {
@@ -22,22 +39,30 @@ Item {
         topInset: settings.topInset
         bottomInset: settings.bottomInset
         maxWidth: 480
-        icon: "upload_file"
+        icon: control.enteringPassword ? "lock" : "upload_file"
         title: i18n.t("settings.exportConfig.dialogTitle")
-        text: i18n.t("settings.exportConfig.dialogDesc")
+        text: control.enteringPassword
+              ? i18n.t("settings.exportEncryptedConfig.passwordHint")
+              : i18n.t("settings.exportConfig.dialogDesc")
         showAcceptButton: false
         rejectText: i18n.t("common.cancel")
-        onRejected: control.closed()
-        onClosed: control.closed()
+        onClosed: {
+            control.passwordText = ""
+            control.enteringPassword = false
+            control.closed()
+        }
 
         Item {
             id: optionsContainer
             width: dialog.contentWidth
-            height: cardPlain.y + cardPlain.height
+            height: control.enteringPassword
+                    ? (backBtn.y + backBtn.height)
+                    : (cardPlain.y + cardPlain.height)
 
             Rectangle {
                 id: cardEncrypted
                 objectName: "exportEncryptedCard"
+                visible: !control.enteringPassword
                 width: parent.width
                 height: Math.max(76, descEnc.y + descEnc.implicitHeight + 14)
                 radius: Ui.radiusMd
@@ -78,11 +103,12 @@ Item {
                 MouseArea {
                     id: mouseEnc
                     anchors.fill: parent
+                    enabled: !control.enteringPassword
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        dialog.close()
-                        control.exportEncrypted()
+                        control.passwordText = ""
+                        control.enteringPassword = true
                     }
                 }
             }
@@ -90,6 +116,7 @@ Item {
             Rectangle {
                 id: cardPlain
                 objectName: "exportPlainCard"
+                visible: !control.enteringPassword
                 y: cardEncrypted.y + cardEncrypted.height + Ui.space3
                 width: parent.width
                 height: Math.max(76, descPlain.y + descPlain.implicitHeight + 14)
@@ -131,6 +158,7 @@ Item {
                 MouseArea {
                     id: mousePlain
                     anchors.fill: parent
+                    enabled: !control.enteringPassword
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
@@ -138,6 +166,48 @@ Item {
                         control.exportPlain()
                     }
                 }
+            }
+
+            TextField {
+                id: exportPasswordField
+                objectName: "exportPasswordField"
+                visible: control.enteringPassword
+                overlayField: true
+                width: parent.width
+                type: "outlined"
+                label: i18n.t("settings.exportEncryptedConfig.passwordLabel")
+                isPassword: true
+                text: control.passwordText
+                onTextChanged: control.passwordText = text
+                onAccepted: control.submitEncrypted()
+            }
+
+            Button {
+                id: backBtn
+                visible: control.enteringPassword
+                y: exportPasswordField.height + Ui.space3
+                width: (parent.width - Ui.space2) / 2
+                height: 44
+                type: "text"
+                text: i18n.t("common.back")
+                onClicked: {
+                    control.passwordText = ""
+                    control.enteringPassword = false
+                }
+            }
+
+            Button {
+                id: confirmExportBtn
+                objectName: "exportEncryptedConfirmButton"
+                visible: control.enteringPassword
+                x: backBtn.width + Ui.space2
+                y: backBtn.y
+                width: (parent.width - Ui.space2) / 2
+                height: 44
+                type: "filled"
+                text: i18n.t("settings.exportEncryptedConfig.confirm")
+                enabled: control.passwordText.length > 0
+                onClicked: control.submitEncrypted()
             }
         }
     }

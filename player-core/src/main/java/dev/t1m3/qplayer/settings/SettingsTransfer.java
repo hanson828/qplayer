@@ -29,10 +29,9 @@ import java.util.Set;
 
 /**
  * Portable exchange format for QPlayer personalized configuration.
- * Serializes all catalog settings, custom typography, audio gain,
- * and track-specific lyric offsets into a versioned JSON document,
- * with optional AES-256-GCM encryption and strict exclusion of any
- * account credentials, cookies, tokens, or login data.
+ * Serializes catalog settings (excluding machine-local paths and sensitive keys),
+ * typography choices, audio gain, and track-specific lyric offsets into a versioned
+ * JSON document, with optional user-passphrase AES-256-GCM encryption.
  */
 public final class SettingsTransfer {
     public static final String FORMAT = "qplayer.settings";
@@ -40,20 +39,23 @@ public final class SettingsTransfer {
     public static final int FORMAT_VERSION = 1;
     public static final String FILE_SUFFIX = ".json";
 
+    public enum ImportStatus {
+        OK,
+        INVALID_FORMAT,
+        PASSWORD_REQUIRED,
+        WRONG_PASSWORD
+    }
+
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
-    // Sensitive keyword blacklist: Any key matching these is strictly forbidden from
-    // being exported or imported, guaranteeing no login tokens, credentials, or cookies
-    // can ever be leaked into configuration files.
     private static final Set<String> SENSITIVE_KEYWORDS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(
                     "cookie", "token", "credential", "auth", "login", "password", "secret", "session", "user"
             )));
 
-    // Internal passphrase & KDF parameters for default AES-256-GCM encrypted export
-    private static final char[] INTERNAL_PASSPHRASE =
-            "QPlayer!Config@Storage#2026$Encrypted%Settings^Secure".toCharArray();
-    private static final int ITERATIONS = 10000;
+    static final int ITERATIONS = 120_000;
+    private static final int MIN_ITERATIONS = 10_000;
+    private static final int MAX_ITERATIONS = 1_000_000;
     private static final int KEY_LENGTH_BITS = 256;
     private static final int GCM_IV_BYTES = 12;
     private static final int GCM_TAG_BITS = 128;
@@ -75,6 +77,7 @@ public final class SettingsTransfer {
         public String appVersion = "";
         public long exportedAtMs;
         public String cipher = "AES-256-GCM";
+        public int iterations = ITERATIONS;
         public String salt;
         public String iv;
         public int tagBits = GCM_TAG_BITS;
@@ -83,10 +86,7 @@ public final class SettingsTransfer {
 
     private SettingsTransfer() {}
 
-    /**
-     * Checks whether a setting key could be related to authentication or credentials.
-     * Guarantees zero sensitive data leakage into configuration files.
-     */
+    /** Checks whether a setting key could be related to authentication or credentials. */
     public static boolean isSensitiveKey(String key) {
         if (key == null) return false;
         String lower = key.toLowerCase(Locale.ROOT);
@@ -96,10 +96,21 @@ public final class SettingsTransfer {
         return false;
     }
 
-    /**
-     * Export all current personalized settings into a formatted plain JSON string.
-     * Guaranteed never to include login credentials or session tokens.
-     */
+    /** Returns true when {@code json} is a JSON object with format {@value #ENCRYPTED_FORMAT}. */
+    public static boolean isEncryptedPayload(String json) {
+        if (json == null || json.trim().isEmpty()) return false;
+        try {
+            JsonElement rootElem = JsonParser.parseString(json);
+            if (!rootElem.isJsonObject()) return false;
+            JsonObject root = rootElem.getAsJsonObject();
+            JsonElement fmt = root.get("format");
+            return fmt != null && fmt.isJsonPrimitive() && ENCRYPTED_FORMAT.equals(fmt.getAsString());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Export current portable settings into a formatted plain JSON string. */
     public static String export(SettingsCore settings, PlayerController controller, String appVersion) {
         Document doc = new Document();
         doc.format = FORMAT;
@@ -108,9 +119,9 @@ public final class SettingsTransfer {
         doc.exportedAtMs = System.currentTimeMillis();
 
         if (settings != null) {
-            // 1. All declared settings specs across all categories
             for (SettingSpec spec : SettingsCatalog.specs()) {
                 if (!spec.hasValue()) continue;
+                if (spec.type == SettingSpec.PATH) continue;
                 if (isSensitiveKey(spec.key)) continue;
                 Object val = settings.raw(spec.key);
                 if (val != null) {
@@ -118,7 +129,6 @@ public final class SettingsTransfer {
                 }
             }
 
-            // 2. Custom font selections (stored outside catalog specs)
             String font = settings.fontSelection();
             if (font != null && !font.isEmpty()) {
                 doc.settings.put(SettingsCore.FONT_KEY, font);
@@ -128,13 +138,11 @@ public final class SettingsTransfer {
                 doc.settings.put(SettingsCore.DESKTOP_LYRIC_FONT_KEY, desktopFont);
             }
 
-            // 3. App volume
             if (settings.appVolume.peek() != null) {
                 doc.settings.put("volume", settings.appVolume.peek());
             }
         }
 
-        // 4. Per-track lyric offsets
         if (controller != null) {
             Map<String, Integer> offsets = controller.getLyricOffsets();
             if (offsets != null && !offsets.isEmpty()) {
@@ -145,29 +153,21 @@ public final class SettingsTransfer {
         return GSON.toJson(doc);
     }
 
-    /**
-     * Export all current settings into an AES-256-GCM encrypted document.
-     * Guaranteed never to include login credentials or session tokens.
-     */
-    public static String exportEncrypted(SettingsCore settings, PlayerController controller, String appVersion) {
-        return exportEncrypted(settings, controller, appVersion, null);
-    }
-
-    /**
-     * Export all current settings into an AES-256-GCM encrypted document with an optional custom passphrase.
-     */
-    public static String exportEncrypted(SettingsCore settings, PlayerController controller, String appVersion,
-                                         char[] optionalPassphrase) {
+    /** Export current portable settings into an AES-256-GCM document protected by {@code passphrase}. */
+    public static String exportEncrypted(SettingsCore settings, PlayerController controller,
+                                         String appVersion, char[] passphrase) {
+        if (passphrase == null || passphrase.length == 0) {
+            throw new IllegalArgumentException("Passphrase must not be empty");
+        }
         String plainJson = export(settings, controller, appVersion);
         byte[] salt = new byte[SALT_BYTES];
         SECURE_RANDOM.nextBytes(salt);
         byte[] iv = new byte[GCM_IV_BYTES];
         SECURE_RANDOM.nextBytes(iv);
 
-        char[] pass = (optionalPassphrase != null && optionalPassphrase.length > 0)
-                ? optionalPassphrase : INTERNAL_PASSPHRASE;
+        byte[] keyBytes = null;
         try {
-            byte[] keyBytes = deriveKey(pass, salt);
+            keyBytes = deriveKey(passphrase, salt, ITERATIONS);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(keyBytes, "AES"), new GCMParameterSpec(GCM_TAG_BITS, iv));
             byte[] ciphertext = cipher.doFinal(plainJson.getBytes(StandardCharsets.UTF_8));
@@ -177,6 +177,7 @@ public final class SettingsTransfer {
             doc.formatVersion = FORMAT_VERSION;
             doc.appVersion = appVersion != null ? appVersion : "";
             doc.exportedAtMs = System.currentTimeMillis();
+            doc.iterations = ITERATIONS;
             doc.salt = Base64.getEncoder().encodeToString(salt);
             doc.iv = Base64.getEncoder().encodeToString(iv);
             doc.data = Base64.getEncoder().encodeToString(ciphertext);
@@ -184,121 +185,141 @@ public final class SettingsTransfer {
             return GSON.toJson(doc);
         } catch (GeneralSecurityException e) {
             throw new RuntimeException("Failed to encrypt settings configuration", e);
+        } finally {
+            if (keyBytes != null) Arrays.fill(keyBytes, (byte) 0);
         }
     }
 
-    /**
-     * Import a configuration string (either plain JSON or AES-256-GCM encrypted) into SettingsCore.
-     * Automatically auto-detects and decrypts encrypted formats.
-     *
-     * @return true if successfully imported and applied, false on invalid format or decryption failure.
-     */
-    public static boolean importInto(String jsonOrEncrypted, SettingsCore settings, PlayerController controller) {
-        return importInto(jsonOrEncrypted, settings, controller, null);
+    /** Import plain JSON settings into {@code settings}. */
+    public static boolean importInto(String json, SettingsCore settings, PlayerController controller) {
+        return importInto(json, null, settings, controller) == ImportStatus.OK;
     }
 
-    /**
-     * Import a configuration string with an optional custom decryption passphrase.
-     */
-    public static boolean importInto(String jsonOrEncrypted, SettingsCore settings, PlayerController controller,
-                                     char[] optionalPassphrase) {
-        if (jsonOrEncrypted == null || jsonOrEncrypted.trim().isEmpty() || settings == null) return false;
+    /** Import plain or encrypted settings using {@code passphrase} when encrypted. */
+    public static ImportStatus importInto(String jsonOrEncrypted, char[] passphrase,
+                                          SettingsCore settings, PlayerController controller) {
+        if (jsonOrEncrypted == null || jsonOrEncrypted.trim().isEmpty() || settings == null) {
+            return ImportStatus.INVALID_FORMAT;
+        }
         try {
             JsonElement rootElem = JsonParser.parseString(jsonOrEncrypted);
-            if (!rootElem.isJsonObject()) return false;
+            if (!rootElem.isJsonObject()) return ImportStatus.INVALID_FORMAT;
             JsonObject root = rootElem.getAsJsonObject();
 
-            String plainJson = jsonOrEncrypted;
-            if (root.has("format") && ENCRYPTED_FORMAT.equals(root.get("format").getAsString())) {
-                plainJson = decryptDocument(root, optionalPassphrase);
-                if (plainJson == null) return false;
+            JsonElement formatElem = root.get("format");
+            if (formatElem == null || !formatElem.isJsonPrimitive()) {
+                return ImportStatus.INVALID_FORMAT;
+            }
+            String format = formatElem.getAsString();
+            String plainJson;
+            if (ENCRYPTED_FORMAT.equals(format)) {
+                if (passphrase == null || passphrase.length == 0) {
+                    return ImportStatus.PASSWORD_REQUIRED;
+                }
+                if (!isValidEncryptedEnvelope(root)) {
+                    return ImportStatus.INVALID_FORMAT;
+                }
+                plainJson = decryptDocument(root, passphrase);
+                if (plainJson == null) {
+                    return ImportStatus.WRONG_PASSWORD;
+                }
+            } else if (FORMAT.equals(format)) {
+                plainJson = jsonOrEncrypted;
+            } else {
+                return ImportStatus.INVALID_FORMAT;
             }
 
             return importPlainJson(plainJson, settings, controller);
         } catch (Throwable t) {
             Logger.warn("import settings failed: {}", t.getMessage());
-            return false;
+            return ImportStatus.INVALID_FORMAT;
         }
     }
 
-    private static String decryptDocument(JsonObject root, char[] optionalPassphrase) {
+    private static boolean isValidEncryptedEnvelope(JsonObject root) {
+        JsonElement salt = root.get("salt");
+        JsonElement iv = root.get("iv");
+        JsonElement data = root.get("data");
+        return salt != null && salt.isJsonPrimitive()
+                && iv != null && iv.isJsonPrimitive()
+                && data != null && data.isJsonPrimitive();
+    }
+
+    private static String decryptDocument(JsonObject root, char[] passphrase) {
+        byte[] keyBytes = null;
         try {
-            if (!root.has("salt") || !root.has("iv") || !root.has("data")) return null;
+            int iterations = ITERATIONS;
+            JsonElement iterElem = root.get("iterations");
+            if (iterElem != null && iterElem.isJsonPrimitive() && iterElem.getAsJsonPrimitive().isNumber()) {
+                iterations = iterElem.getAsInt();
+            }
+            if (iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
+                Logger.warn("unsupported settings KDF iterations: {}", iterations);
+                return null;
+            }
             byte[] salt = Base64.getDecoder().decode(root.get("salt").getAsString());
             byte[] iv = Base64.getDecoder().decode(root.get("iv").getAsString());
             byte[] ciphertext = Base64.getDecoder().decode(root.get("data").getAsString());
 
-            char[] pass = (optionalPassphrase != null && optionalPassphrase.length > 0)
-                    ? optionalPassphrase : INTERNAL_PASSPHRASE;
-            byte[] keyBytes = deriveKey(pass, salt);
+            keyBytes = deriveKey(passphrase, salt, iterations);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(keyBytes, "AES"), new GCMParameterSpec(GCM_TAG_BITS, iv));
             byte[] decrypted = cipher.doFinal(ciphertext);
             return new String(decrypted, StandardCharsets.UTF_8);
-        } catch (GeneralSecurityException e) {
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
             Logger.warn("failed to decrypt settings configuration: {}", e.getMessage());
             return null;
+        } finally {
+            if (keyBytes != null) Arrays.fill(keyBytes, (byte) 0);
         }
     }
 
-    private static boolean importPlainJson(String json, SettingsCore settings, PlayerController controller) {
+    private static ImportStatus importPlainJson(String json, SettingsCore settings, PlayerController controller) {
         JsonElement rootElem = JsonParser.parseString(json);
-        if (!rootElem.isJsonObject()) return false;
+        if (!rootElem.isJsonObject()) return ImportStatus.INVALID_FORMAT;
         JsonObject root = rootElem.getAsJsonObject();
 
-        JsonObject settingsObj = null;
+        JsonElement formatElem = root.get("format");
+        if (formatElem == null || !formatElem.isJsonPrimitive() || !FORMAT.equals(formatElem.getAsString())) {
+            return ImportStatus.INVALID_FORMAT;
+        }
+        JsonElement settingsElem = root.get("settings");
+        if (settingsElem == null || !settingsElem.isJsonObject()) {
+            return ImportStatus.INVALID_FORMAT;
+        }
+        JsonObject settingsObj = settingsElem.getAsJsonObject();
         JsonObject offsetsObj = null;
-
-        if (root.has("format") && FORMAT.equals(root.get("format").getAsString())) {
-            if (root.has("settings") && root.get("settings").isJsonObject()) {
-                settingsObj = root.getAsJsonObject("settings");
-            }
-            if (root.has("lyricOffsets") && root.get("lyricOffsets").isJsonObject()) {
-                offsetsObj = root.getAsJsonObject("lyricOffsets");
-            }
-        } else if (root.has("settings") && root.get("settings").isJsonObject()) {
-            settingsObj = root.getAsJsonObject("settings");
-        } else {
-            // Loose json: treat the top-level keys as settings directly
-            settingsObj = root;
+        JsonElement offsetsElem = root.get("lyricOffsets");
+        if (offsetsElem != null && !offsetsElem.isJsonNull()) {
+            if (!offsetsElem.isJsonObject()) return ImportStatus.INVALID_FORMAT;
+            offsetsObj = offsetsElem.getAsJsonObject();
         }
 
-        if (settingsObj != null) {
-            for (Map.Entry<String, JsonElement> entry : settingsObj.entrySet()) {
-                String key = entry.getKey();
-                if (isSensitiveKey(key)) continue; // Never import credentials
+        for (Map.Entry<String, JsonElement> entry : settingsObj.entrySet()) {
+            String key = entry.getKey();
+            if (isSensitiveKey(key)) continue;
 
-                JsonElement elem = entry.getValue();
-                if (elem == null || elem.isJsonNull()) continue;
+            JsonElement elem = entry.getValue();
+            if (elem == null || elem.isJsonNull()) continue;
 
-                if (SettingsCore.FONT_KEY.equals(key)) {
-                    if (elem.isJsonPrimitive()) {
-                        settings.setFontSelection(elem.getAsString());
-                    }
-                } else if (SettingsCore.DESKTOP_LYRIC_FONT_KEY.equals(key)) {
-                    if (elem.isJsonPrimitive()) {
-                        settings.setDesktopLyricFontSelection(elem.getAsString());
-                    }
-                } else if ("volume".equals(key)) {
-                    if (elem.isJsonPrimitive() && elem.getAsJsonPrimitive().isNumber()) {
-                        settings.setAppVolume(elem.getAsInt());
-                    }
-                } else if (settings.hasSpec(key)) {
-                    SettingSpec spec = settings.specOf(key);
-                    if (spec != null) {
-                        Object parsedVal = parseValueForSpec(spec, elem);
-                        if (parsedVal != null) {
-                            settings.setValue(key, parsedVal);
-                        }
-                    }
-                } else {
-                    // Persist non-native or platform-specific key directly to store so it's not lost
-                    SettingsStore store = settings.store();
-                    if (store != null && elem.isJsonPrimitive()) {
-                        JsonPrimitive p = elem.getAsJsonPrimitive();
-                        if (p.isBoolean()) store.putBool(key, p.getAsBoolean());
-                        else if (p.isNumber()) store.putInt(key, p.getAsInt());
-                        else store.putString(key, p.getAsString());
+            if (SettingsCore.FONT_KEY.equals(key)) {
+                if (elem.isJsonPrimitive()) {
+                    settings.setFontSelection(elem.getAsString());
+                }
+            } else if (SettingsCore.DESKTOP_LYRIC_FONT_KEY.equals(key)) {
+                if (elem.isJsonPrimitive()) {
+                    settings.setDesktopLyricFontSelection(elem.getAsString());
+                }
+            } else if ("volume".equals(key)) {
+                if (elem.isJsonPrimitive() && elem.getAsJsonPrimitive().isNumber()) {
+                    settings.setAppVolume(elem.getAsInt());
+                }
+            } else if (settings.hasSpec(key)) {
+                SettingSpec spec = settings.specOf(key);
+                if (spec != null && spec.hasValue() && spec.type != SettingSpec.PATH) {
+                    Object parsedVal = parseValueForSpec(spec, elem);
+                    if (parsedVal != null) {
+                        settings.setValue(key, parsedVal);
                     }
                 }
             }
@@ -307,21 +328,20 @@ public final class SettingsTransfer {
         if (offsetsObj != null && controller != null) {
             Map<String, Integer> offsets = new LinkedHashMap<>();
             for (Map.Entry<String, JsonElement> entry : offsetsObj.entrySet()) {
-                if (entry.getValue().isJsonPrimitive() && entry.getValue().getAsJsonPrimitive().isNumber()) {
-                    offsets.put(entry.getKey(), entry.getValue().getAsInt());
+                JsonElement val = entry.getValue();
+                if (val != null && val.isJsonPrimitive() && val.getAsJsonPrimitive().isNumber()) {
+                    offsets.put(entry.getKey(), val.getAsInt());
                 }
             }
             controller.importLyricOffsets(offsets);
         }
 
-        // Push every updated setting into runtime consumers (themes, fonts, lyrics, volume)
-        settings.applyAll();
-        return true;
+        return ImportStatus.OK;
     }
 
-    private static byte[] deriveKey(char[] passphrase, byte[] salt) throws GeneralSecurityException {
+    private static byte[] deriveKey(char[] passphrase, byte[] salt, int iterations) throws GeneralSecurityException {
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-        KeySpec spec = new PBEKeySpec(passphrase, salt, ITERATIONS, KEY_LENGTH_BITS);
+        KeySpec spec = new PBEKeySpec(passphrase, salt, iterations, KEY_LENGTH_BITS);
         return factory.generateSecret(spec).getEncoded();
     }
 
@@ -342,7 +362,6 @@ public final class SettingsTransfer {
                     return null;
                 }
             case SettingSpec.COLOR:
-            case SettingSpec.PATH:
             case SettingSpec.TEXT:
                 return p.getAsString();
             default:

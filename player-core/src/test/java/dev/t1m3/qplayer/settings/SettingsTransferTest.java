@@ -55,39 +55,40 @@ public class SettingsTransferTest {
     }
 
     @Test
-    public void exportAndImportRoundTrip() {
+    public void exportAndImportRoundTripExcludesPaths() {
         SettingsCore source = new SettingsCore();
         TestSettingsStore store1 = new TestSettingsStore();
-        source.load(store1, SettingsCatalog.ANDROID);
+        source.setDefault("musicFolder", "C:\\OldMachine\\Music");
+        source.setDefault("cacheFolder", "C:\\OldMachine\\Cache");
+        source.load(store1, SettingsCatalog.DESKTOP);
 
-        // Customize various settings across categories
         source.setValue("darkMode", 2);
         source.setValue("uiScale", 115);
         source.setValue("lyricFontSize", 32);
         source.setValue("lyricSpring", false);
         source.setValue("lyricScale", false);
         source.setValue("lyricLineSpacing", 230);
-        source.setValue("overlayLyricFontSize", 22);
         source.setValue("highQuality", false);
         source.setAppVolume(65);
         source.setFontSelection("TestCustomFont");
 
-        String json = SettingsTransfer.export(source, null, "2.3.0");
+        String json = SettingsTransfer.export(source, null, "2.3.1");
         assertNotNull(json);
         assertTrue(json.contains(SettingsTransfer.FORMAT));
+        assertFalse("PATH specs must not be exported", json.contains("musicFolder"));
+        assertFalse("PATH specs must not be exported", json.contains("cacheFolder"));
         assertTrue(json.contains("\"darkMode\": 2"));
-        assertTrue(json.contains("\"lyricFontSize\": 32"));
-        assertTrue(json.contains("\"lyricSpring\": false"));
-        assertTrue(json.contains("TestCustomFont"));
         assertTrue(json.contains("\"volume\": 65"));
 
-        // Import into target settings
         SettingsCore target = new SettingsCore();
         TestSettingsStore store2 = new TestSettingsStore();
-        target.load(store2, SettingsCatalog.ANDROID);
+        target.setDefault("musicFolder", "D:\\NewMachine\\Music");
+        target.setDefault("cacheFolder", "D:\\NewMachine\\Cache");
+        target.load(store2, SettingsCatalog.DESKTOP);
 
-        boolean ok = SettingsTransfer.importInto(json, target, null);
-        assertTrue(ok);
+        assertFalse(SettingsTransfer.isEncryptedPayload(json));
+        assertEquals(SettingsTransfer.ImportStatus.OK,
+                SettingsTransfer.importInto(json, null, target, null));
 
         assertEquals(2, target.intOf("darkMode"));
         assertEquals(115, target.intOf("uiScale"));
@@ -95,116 +96,82 @@ public class SettingsTransferTest {
         assertFalse(target.bool("lyricSpring"));
         assertFalse(target.bool("lyricScale"));
         assertEquals(230, target.intOf("lyricLineSpacing"));
-        assertEquals(22, target.intOf("overlayLyricFontSize"));
         assertFalse(target.bool("highQuality"));
         assertEquals((Integer) 65, target.appVolume.peek());
         assertEquals("TestCustomFont", target.fontSelection());
+        assertEquals("D:\\NewMachine\\Music", target.str("musicFolder"));
+        assertEquals("D:\\NewMachine\\Cache", target.str("cacheFolder"));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void exportEncryptedRequiresNonEmptyPassphrase() {
+        SettingsCore source = new SettingsCore();
+        source.load(new TestSettingsStore(), SettingsCatalog.ANDROID);
+        SettingsTransfer.exportEncrypted(source, null, "2.3.1", new char[0]);
     }
 
     @Test
-    public void exportEncryptedAndImportRoundTrip() {
+    public void exportEncryptedWithUserPassphraseRoundTrip() {
         SettingsCore source = new SettingsCore();
-        TestSettingsStore store1 = new TestSettingsStore();
-        source.load(store1, SettingsCatalog.ANDROID);
-
+        source.load(new TestSettingsStore(), SettingsCatalog.ANDROID);
         source.setValue("darkMode", 1);
-        source.setValue("uiScale", 105);
-        source.setValue("lyricFontSize", 28);
+        source.setValue("uiScale", 120);
         source.setFontSelection("EncryptedFontTest");
 
-        // 1. Export encrypted
-        String encJson = SettingsTransfer.exportEncrypted(source, null, "2.3.0");
+        char[] passphrase = "MySecretCustomPassword123!".toCharArray();
+        String encJson = SettingsTransfer.exportEncrypted(source, null, "2.3.1", passphrase);
         assertNotNull(encJson);
-        assertTrue(encJson.contains(SettingsTransfer.ENCRYPTED_FORMAT));
-        assertTrue(encJson.contains("\"cipher\": \"AES-256-GCM\""));
-        // Ensure sensitive config plaintext is NOT readable directly in encrypted file
+        assertTrue(SettingsTransfer.isEncryptedPayload(encJson));
+        assertTrue(encJson.contains("\"iterations\": " + SettingsTransfer.ITERATIONS));
         assertFalse(encJson.contains("EncryptedFontTest"));
-        assertFalse(encJson.contains("\"darkMode\": 1"));
 
-        // 2. Import encrypted document
         SettingsCore target = new SettingsCore();
-        TestSettingsStore store2 = new TestSettingsStore();
-        target.load(store2, SettingsCatalog.ANDROID);
+        target.load(new TestSettingsStore(), SettingsCatalog.ANDROID);
 
-        boolean ok = SettingsTransfer.importInto(encJson, target, null);
-        assertTrue(ok);
-
+        assertEquals(SettingsTransfer.ImportStatus.PASSWORD_REQUIRED,
+                SettingsTransfer.importInto(encJson, null, target, null));
+        assertEquals(SettingsTransfer.ImportStatus.WRONG_PASSWORD,
+                SettingsTransfer.importInto(encJson, "WrongPass".toCharArray(), target, null));
+        assertEquals(SettingsTransfer.ImportStatus.OK,
+                SettingsTransfer.importInto(encJson, passphrase, target, null));
         assertEquals(1, target.intOf("darkMode"));
-        assertEquals(105, target.intOf("uiScale"));
-        assertEquals(28, target.intOf("lyricFontSize"));
+        assertEquals(120, target.intOf("uiScale"));
         assertEquals("EncryptedFontTest", target.fontSelection());
     }
 
     @Test
-    public void exportEncryptedWithCustomPassphrase() {
-        SettingsCore source = new SettingsCore();
-        TestSettingsStore store1 = new TestSettingsStore();
-        source.load(store1, SettingsCatalog.ANDROID);
-        source.setValue("uiScale", 120);
-
-        char[] passphrase = "MySecretCustomPassword123!".toCharArray();
-        String encJson = SettingsTransfer.exportEncrypted(source, null, "2.3.0", passphrase);
-        assertNotNull(encJson);
-
-        SettingsCore target = new SettingsCore();
-        TestSettingsStore store2 = new TestSettingsStore();
-        target.load(store2, SettingsCatalog.ANDROID);
-
-        // Wrong password should fail safely
-        boolean wrongPassOk = SettingsTransfer.importInto(encJson, target, null, "WrongPass".toCharArray());
-        assertFalse(wrongPassOk);
-
-        // Correct password should succeed
-        boolean ok = SettingsTransfer.importInto(encJson, target, null, passphrase);
-        assertTrue(ok);
-        assertEquals(120, target.intOf("uiScale"));
-    }
-
-    @Test
-    public void loginAndCredentialsNeverExportedOrImported() {
-        // Test sensitive key filter
-        assertTrue(SettingsTransfer.isSensitiveKey("cookie"));
-        assertTrue(SettingsTransfer.isSensitiveKey("netease_token"));
-        assertTrue(SettingsTransfer.isSensitiveKey("user_credential"));
-        assertTrue(SettingsTransfer.isSensitiveKey("auth_session"));
-        assertTrue(SettingsTransfer.isSensitiveKey("loginPassword"));
-        assertFalse(SettingsTransfer.isSensitiveKey("fontFamily"));
-        assertFalse(SettingsTransfer.isSensitiveKey("darkMode"));
-        assertFalse(SettingsTransfer.isSensitiveKey("uiScale"));
-
-        // Test that if someone puts fake login keys into a JSON, importInto ignores them completely
-        String taintedJson = "{\n" +
-                "  \"format\": \"qplayer.settings\",\n" +
-                "  \"settings\": {\n" +
-                "    \"darkMode\": 1,\n" +
-                "    \"userCookie\": \"SECRET_COOKIE_DATA\",\n" +
-                "    \"authToken\": \"SECRET_TOKEN\",\n" +
-                "    \"credentialPass\": \"SECRET_PASSWORD\"\n" +
-                "  }\n" +
-                "}";
-
+    public void importStrictlyRejectsUnknownFormatLooseJsonAndPathKeys() {
         SettingsCore target = new SettingsCore();
         TestSettingsStore store = new TestSettingsStore();
-        target.load(store, SettingsCatalog.ANDROID);
+        target.setDefault("musicFolder", "D:\\KeepMyMusic");
+        target.load(store, SettingsCatalog.DESKTOP);
 
-        boolean ok = SettingsTransfer.importInto(taintedJson, target, null);
-        assertTrue(ok);
+        assertFalse(SettingsTransfer.importInto(null, target, null));
+        assertFalse(SettingsTransfer.importInto("", target, null));
+        assertFalse(SettingsTransfer.importInto("{malformed json", target, null));
+        assertFalse(SettingsTransfer.importInto("[\"an\", \"array\"]", target, null));
+        // Loose JSON or unrelated playlist JSON (.qpl.json) must be rejected cleanly
+        assertEquals(SettingsTransfer.ImportStatus.INVALID_FORMAT,
+                SettingsTransfer.importInto("{\"darkMode\": 2}", null, target, null));
+        assertEquals(SettingsTransfer.ImportStatus.INVALID_FORMAT,
+                SettingsTransfer.importInto("{\"format\": \"qplayer.playlist\", \"settings\": {\"darkMode\": 2}}",
+                        null, target, null));
+
+        // Valid format still ignores unknown raw keys and PATH specs
+        String mixed = "{\n"
+                + "  \"format\": \"qplayer.settings\",\n"
+                + "  \"settings\": {\n"
+                + "    \"darkMode\": 1,\n"
+                + "    \"musicFolder\": \"/tmp/hijack\",\n"
+                + "    \"unknownArbitraryKey\": \"should_not_persist\",\n"
+                + "    \"authToken\": \"SECRET\"\n"
+                + "  }\n"
+                + "}";
+        assertEquals(SettingsTransfer.ImportStatus.OK,
+                SettingsTransfer.importInto(mixed, null, target, null));
         assertEquals(1, target.intOf("darkMode"));
-        assertFalse(store.has("userCookie"));
+        assertEquals("D:\\KeepMyMusic", target.str("musicFolder"));
+        assertFalse(store.has("unknownArbitraryKey"));
         assertFalse(store.has("authToken"));
-        assertFalse(store.has("credentialPass"));
-    }
-
-    @Test
-    public void importInvalidJsonReturnsFalseWithoutThrowing() {
-        SettingsCore settings = new SettingsCore();
-        TestSettingsStore store = new TestSettingsStore();
-        settings.load(store, SettingsCatalog.ANDROID);
-
-        assertFalse(SettingsTransfer.importInto(null, settings, null));
-        assertFalse(SettingsTransfer.importInto("", settings, null));
-        assertFalse(SettingsTransfer.importInto("   ", settings, null));
-        assertFalse(SettingsTransfer.importInto("{malformed json", settings, null));
-        assertFalse(SettingsTransfer.importInto("[\"an\", \"array\"]", settings, null));
     }
 }

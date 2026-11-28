@@ -560,7 +560,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
 
     /** Push every seeded value into whatever consumes it. Runs once at load, so
      *  a consumer sees the persisted state without the host replaying it. */
-    public void applyAll() {
+    private void applyAll() {
         // Before anything reads a string: every other consumer resolves keys
         // through whatever language is active at that moment.
         applyLanguage();
@@ -702,6 +702,30 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public final Property<String> colorPickerKey = new Property<>("");
     /** Dialog flag to present encrypted and plain export choices together. */
     public final Property<Boolean> exportConfigOpen = new Property<>(Boolean.FALSE);
+    /** Dialog flag + error text when importing an encrypted configuration file. */
+    public final Property<Boolean> importPasswordOpen = new Property<>(Boolean.FALSE);
+    public final Property<String> importPasswordError = new Property<>("");
+    private char[] transferPassphrase;
+
+    public void setTransferPassphrase(String passphrase) {
+        clearTransferPassphrase();
+        if (passphrase != null && !passphrase.isEmpty()) {
+            transferPassphrase = passphrase.toCharArray();
+        }
+    }
+
+    public char[] consumeTransferPassphrase() {
+        char[] copy = transferPassphrase;
+        transferPassphrase = null;
+        return copy;
+    }
+
+    private void clearTransferPassphrase() {
+        if (transferPassphrase != null) {
+            java.util.Arrays.fill(transferPassphrase, '\0');
+            transferPassphrase = null;
+        }
+    }
 
     /** Reactive current-font readout for the picker dialog and the 外观 row. */
     public String fontFamily() {

@@ -7403,18 +7403,25 @@ public final class PlayerController {
         }
     }
 
-    /** Merge imported track lyric offsets into the current store and persist. */
+    /** Merge imported track lyric offsets (clamped to [-5000, 5000] ms) and persist asynchronously. */
     public void importLyricOffsets(Map<String, Integer> offsets) {
         if (offsets == null || offsets.isEmpty()) return;
+        boolean changed = false;
         synchronized (lyricOffsets) {
             for (Map.Entry<String, Integer> entry : offsets.entrySet()) {
                 String canonical = canonicalLyricOffsetKey(entry.getKey());
-                if (!canonical.isEmpty() && entry.getValue() != null && entry.getValue() != 0) {
-                    lyricOffsets.put(canonical, entry.getValue());
+                if (!canonical.isEmpty() && entry.getValue() != null) {
+                    int clamped = Math.max(-5000, Math.min(5000, entry.getValue()));
+                    if (clamped != 0) {
+                        lyricOffsets.put(canonical, clamped);
+                        changed = true;
+                    }
                 }
             }
         }
-        saveLyricOffsets();
+        if (changed) {
+            worker.submit(this::saveLyricOffsets);
+        }
     }
 
     // --- Netease discovery ------------------------------------------------

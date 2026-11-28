@@ -64,6 +64,7 @@ public final class QPlayerActivity extends Activity {
     private AudioSaveRequest pendingAudioSave;
     private String pendingExportJson;
     private boolean pendingExportIsEncrypted;
+    private String pendingImportEncryptedJson;
     private final java.util.Set<AudioSaveRequest> audioSaves =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Map<String, Consumer<Object>> settingsHooks = new java.util.HashMap<>();
@@ -316,6 +317,8 @@ public final class QPlayerActivity extends Activity {
         settings.registerAction("exportEncryptedSettings", this::requestExportEncryptedSettings);
         settings.registerAction("exportPlainSettings", this::requestExportSettings);
         settings.registerAction("importSettings", this::requestImportSettings);
+        settings.registerAction("confirmImportSettingsPassword", this::confirmImportSettingsPassword);
+        settings.registerAction("cancelImportSettingsPassword", this::cancelImportSettingsPassword);
         settings.registerInfo("version", () -> "v" + boundController.appVersion.peek());
         settings.registerInfo("cacheUsage", () -> boundController.cacheSizeMB.peek() + " MB");
         OverlayLyricWindow.bindSettings(getApplicationContext(), settings);
@@ -852,9 +855,17 @@ public final class QPlayerActivity extends Activity {
     private void requestExportEncryptedSettings() {
         dev.t1m3.qplayer.util.Logger.info("requestExportEncryptedSettings called");
         if (settings == null) return;
+        char[] passphrase = settings.consumeTransferPassphrase();
+        if (passphrase == null || passphrase.length == 0) {
+            if (controller != null) {
+                controller.showToast(I18n.tr("settings.importPassword.required"));
+            }
+            return;
+        }
         try {
             String appVer = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-            String json = dev.t1m3.qplayer.settings.SettingsTransfer.exportEncrypted(settings, controller, appVer);
+            String json = dev.t1m3.qplayer.settings.SettingsTransfer.exportEncrypted(
+                    settings, controller, appVer, passphrase);
             pendingExportJson = json;
             pendingExportIsEncrypted = true;
             String dateStr = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(new java.util.Date());
@@ -869,6 +880,8 @@ public final class QPlayerActivity extends Activity {
             if (controller != null) {
                 controller.showToast(dev.t1m3.qplayer.i18n.I18n.tr("toast.settings.exportFailed", t.getMessage()));
             }
+        } finally {
+            java.util.Arrays.fill(passphrase, '\0');
         }
     }
 
@@ -905,6 +918,49 @@ public final class QPlayerActivity extends Activity {
             startActivityForResult(intent, REQ_SETTINGS_IMPORT);
         } catch (Throwable t) {
             dev.t1m3.qplayer.util.Logger.error("open settings import document failed: {}", t.toString());
+        }
+    }
+
+    private void confirmImportSettingsPassword() {
+        if (settings == null) return;
+        char[] passphrase = settings.consumeTransferPassphrase();
+        String json = pendingImportEncryptedJson;
+        if (json == null) {
+            if (passphrase != null) java.util.Arrays.fill(passphrase, '\0');
+            settings.importPasswordOpen.set(Boolean.FALSE);
+            return;
+        }
+        try {
+            dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus status =
+                    dev.t1m3.qplayer.settings.SettingsTransfer.importInto(json, passphrase, settings, controller);
+            if (status == dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus.WRONG_PASSWORD) {
+                settings.importPasswordError.set(I18n.tr("settings.importPassword.wrong"));
+                return;
+            }
+            if (status == dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus.PASSWORD_REQUIRED) {
+                settings.importPasswordError.set(I18n.tr("settings.importPassword.required"));
+                return;
+            }
+            pendingImportEncryptedJson = null;
+            settings.importPasswordError.set("");
+            settings.importPasswordOpen.set(Boolean.FALSE);
+            if (controller != null) {
+                controller.showToast(I18n.tr(status == dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus.OK
+                        ? "toast.settings.importSuccess"
+                        : "toast.settings.importInvalid"));
+            }
+        } finally {
+            if (passphrase != null) java.util.Arrays.fill(passphrase, '\0');
+        }
+    }
+
+    private void cancelImportSettingsPassword() {
+        pendingImportEncryptedJson = null;
+        if (settings != null) {
+            char[] unused = settings.consumeTransferPassphrase();
+            if (unused != null) java.util.Arrays.fill(unused, '\0');
+            settings.importPasswordError.set("");
+            settings.importPasswordOpen.set(Boolean.FALSE);
         }
     }
 
@@ -1018,14 +1074,24 @@ public final class QPlayerActivity extends Activity {
                     SettingsCore s = settings;
                     PlayerController c = controller;
                     if (view != null && s != null) {
-                        view.queueEvent(() -> {
-                            boolean ok = dev.t1m3.qplayer.settings.SettingsTransfer.importInto(json, s, c);
-                            if (c != null) {
-                                c.showToast(dev.t1m3.qplayer.i18n.I18n.tr(ok
-                                        ? "toast.settings.importSuccess"
-                                        : "toast.settings.importInvalid"));
-                            }
-                        });
+                        if (dev.t1m3.qplayer.settings.SettingsTransfer.isEncryptedPayload(json)) {
+                            view.queueEvent(() -> {
+                                pendingImportEncryptedJson = json;
+                                s.importPasswordError.set("");
+                                s.importPasswordOpen.set(Boolean.TRUE);
+                            });
+                        } else {
+                            view.queueEvent(() -> {
+                                dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus status =
+                                        dev.t1m3.qplayer.settings.SettingsTransfer.importInto(json, null, s, c);
+                                if (c != null) {
+                                    c.showToast(dev.t1m3.qplayer.i18n.I18n.tr(
+                                            status == dev.t1m3.qplayer.settings.SettingsTransfer.ImportStatus.OK
+                                                    ? "toast.settings.importSuccess"
+                                                    : "toast.settings.importInvalid"));
+                                }
+                            });
+                        }
                     }
                 } catch (Throwable t) {
                     dev.t1m3.qplayer.util.Logger.error("read settings import failed: {}", t.toString());

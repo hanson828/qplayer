@@ -228,4 +228,10 @@ Rectangle {
         onExportEncrypted: settings.invoke("exportEncryptedSettings")
         onExportPlain: settings.invoke("exportPlainSettings")
     }
+
+    ImportConfigPasswordDialog {
+        objectName: "settingsImportPasswordDialog"
+        active: settings.importPasswordOpen
+        onClosed: settings.importPasswordOpen = false
+    }
 }
