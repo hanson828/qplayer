@@ -430,10 +430,48 @@ final class LyricRowRenderer implements AutoCloseable {
         return emptyShader;
     }
 
+    private static volatile RuntimeEffect sharedRowEffect;
+    private static volatile boolean sharedRowEffectFailed;
+
+    /** Pre-compile SkSL lyric row shader off the render thread at app startup. */
+    public static void prewarmShaders() {
+        if (sharedRowEffect != null || sharedRowEffectFailed) return;
+        synchronized (LyricRowRenderer.class) {
+            if (sharedRowEffect != null || sharedRowEffectFailed) return;
+            try {
+                RuntimeEffect effect = compileShaderResource();
+                if (effect != null) {
+                    sharedRowEffect = effect;
+                } else {
+                    sharedRowEffectFailed = true;
+                }
+            } catch (Throwable t) {
+                sharedRowEffectFailed = true;
+            }
+        }
+    }
+
     private RuntimeEffectBuilder rowBuilder() {
-        if (rowEffectUnavailable) return null;
+        if (rowEffectUnavailable || sharedRowEffectFailed) return null;
         if (rowBuilder == null) {
-            if (rowEffect == null) rowEffect = compileShaderResource();
+            if (rowEffect == null) {
+                if (sharedRowEffect != null) {
+                    rowEffect = sharedRowEffect;
+                } else {
+                    synchronized (LyricRowRenderer.class) {
+                        if (sharedRowEffect != null) {
+                            rowEffect = sharedRowEffect;
+                        } else if (!sharedRowEffectFailed) {
+                            rowEffect = compileShaderResource();
+                            if (rowEffect != null) {
+                                sharedRowEffect = rowEffect;
+                            } else {
+                                sharedRowEffectFailed = true;
+                            }
+                        }
+                    }
+                }
+            }
             if (rowEffect == null) {
                 rowEffectUnavailable = true;
                 return null;
@@ -533,7 +571,9 @@ final class LyricRowRenderer implements AutoCloseable {
             rowBuilder = null;
         }
         if (rowEffect != null) {
-            rowEffect.close();
+            if (rowEffect != sharedRowEffect) {
+                rowEffect.close();
+            }
             rowEffect = null;
         }
         lyricLayerPaint.close();

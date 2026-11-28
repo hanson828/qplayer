@@ -751,6 +751,8 @@ public final class Fonts {
         WARMUP.execute(() -> {
             try {
                 warmup(weight, mainSize);
+                FluidBackground.prewarmShaders();
+                LyricRowRenderer.prewarmShaders();
             } catch (Throwable ignored) {
             }
         });

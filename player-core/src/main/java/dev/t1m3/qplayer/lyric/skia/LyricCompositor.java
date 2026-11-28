@@ -586,6 +586,20 @@ public final class LyricCompositor {
         }
         pageCachesReleased = false;
 
+        // Trigger off-thread fluid cover texture pre-decode only while the lyric page
+        // is opening or visible, keeping closed browsing idle.
+        byte[] cover = (byte[]) controller.coverBytes.peek();
+        Object title = controller.title.peek();
+        Object coverUrl = controller.coverUrl.peek();
+        if (lyCoverKey == null || title != lyKeyTitle || coverUrl != lyKeyUrl) {
+            lyKeyTitle = title;
+            lyKeyUrl = coverUrl;
+            lyCoverKey = title + "|" + coverUrl;
+        }
+        if (cover != null && lyCoverKey != null) {
+            fluidBg.prewarmCover(cover, lyCoverKey);
+        }
+
         // Per-frame playback fraction for the QML wavy progress bar and the word
         // renderer. backend.position() is coarse, so extrapolate with wall-clock time.
         // Crucially, isLyricClockRunning() stays false until backend.onStarted, then
@@ -717,16 +731,7 @@ public final class LyricCompositor {
         float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
         canvas.translate(0f, (1f - ease) * h);
 
-        // 1) fluid backdrop, keyed by the current track. The key only changes on a
-        // track switch, so rebuild the concatenated string only when an input does.
-        byte[] cover = (byte[]) controller.coverBytes.peek();
-        Object title = controller.title.peek();
-        Object coverUrl = controller.coverUrl.peek();
-        if (lyCoverKey == null || title != lyKeyTitle || coverUrl != lyKeyUrl) {
-            lyKeyTitle = title;
-            lyKeyUrl = coverUrl;
-            lyCoverKey = title + "|" + coverUrl;
-        }
+        // 1) fluid backdrop, keyed by the current track (resolved above).
         boolean bgStatic = settings != null && settings.lyricBgStatic();
         int bgStyle = settings != null
                 ? settings.lyricBgStyle() : FluidBackground.STYLE_MESH_GRADIENT;

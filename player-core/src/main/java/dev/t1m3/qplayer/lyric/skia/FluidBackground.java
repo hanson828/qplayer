@@ -47,7 +47,15 @@ public final class FluidBackground {
     };
     private static final RuntimeEffect[][] EFFECTS = new RuntimeEffect[3][2];
 
-    private static RuntimeEffect makeEffect(int style, boolean fade) {
+    /** Pre-compile all fluid SkSL shaders off the render thread so first frame never stalls on parsing. */
+    public static synchronized void prewarmShaders() {
+        for (int style = 0; style < 3; style++) {
+            makeEffect(style, false);
+            makeEffect(style, true);
+        }
+    }
+
+    private static synchronized RuntimeEffect makeEffect(int style, boolean fade) {
         int safeStyle = normalizeStyle(style);
         int variant = fade ? 1 : 0;
         RuntimeEffect cached = EFFECTS[safeStyle][variant];
@@ -173,46 +181,8 @@ public final class FluidBackground {
             fluidPaint.setColorFilter(saturationFilter);
             invalidateStatic(); // a cached static frame baked in the old saturation
         }
-        boolean keyChanged = !Objects.equals(trackKey, coverKey);
-        boolean nullButReady = cover == null && coverBytes != null && coverBytes.length > 0;
-        // Kick an off-thread decode for a newly-selected cover, once per key.
-        if ((keyChanged || nullButReady) && coverBytes != null && coverBytes.length > 0
-                && !Objects.equals(trackKey, decodingKey)) {
-            decodingKey = trackKey;
-            final byte[] cb = coverBytes;
-            final String key = trackKey;
-            decoder.submit(() -> {
-                DecodedTextures textures = buildTextures(cb, key);
-                if (textures != null) publishDecoded(textures);
-            });
-        }
-        // Publish a ready off-thread texture (render thread): swap the shader, drop the
-        // old cover. Cheap — the expensive work already happened on the decoder thread.
-        DecodedTextures ready = takeDecoded(trackKey);
-        if (ready != null) {
-            // Retire the current cover to the "prev" slot and cross-fade to the new one
-            // rather than snapping. Both stay alive until the fade ends (releasePrev).
-            releasePrev();
-            coverPrevShader = coverShader;   // null on the very first cover
-            coverPrev = cover;
-            coverPrevAdjustedShader = coverAdjustedShader;
-            coverPrevAdjusted = coverAdjusted;
-            coverPrevAngles = coverPrevShader == null ? null : coverAngles;
-            coverPrevMesh = coverPrevShader == null ? null : coverMesh;
-            cover = ready.raw;
-            coverAdjusted = ready.adjusted;
-            coverKey = trackKey;
-            coverAngles = ready.angles;
-            coverMesh = ready.mesh;
-            coverShader = cover.makeShader(
-                    FilterTileMode.CLAMP, FilterTileMode.CLAMP,
-                    SamplingMode.LINEAR, Matrix33.IDENTITY);
-            coverAdjustedShader = coverAdjusted.makeShader(
-                    FilterTileMode.CLAMP, FilterTileMode.CLAMP,
-                    SamplingMode.LINEAR, Matrix33.IDENTITY);
-            fadeStartNs = nowNs;
-            invalidateStatic();   // the source changed -> the cached frame is stale
-        }
+        prewarmCover(coverBytes, trackKey);
+        adoptDecodedIfReady(trackKey, nowNs);
         if (coverShader == null) {
             renderFallback(canvas, w, h, 0xFF0A0A0E);
             return;
@@ -260,6 +230,50 @@ public final class FluidBackground {
             if (drawFluidScaled(canvas, ctx, fullRect, dw, dh, time, fade)) return;
         }
         drawFluid(canvas, fullRect, w, h, time, fade);
+    }
+
+    /** Pre-decode cover textures off-thread for a track while the lyric page is opening or visible. */
+    public void prewarmCover(byte[] coverBytes, String trackKey) {
+        if (coverBytes == null || coverBytes.length == 0 || trackKey == null) return;
+        boolean keyChanged = !Objects.equals(trackKey, coverKey);
+        boolean nullButReady = cover == null;
+        if ((keyChanged || nullButReady) && !Objects.equals(trackKey, decodingKey)) {
+            decodingKey = trackKey;
+            final byte[] cb = coverBytes;
+            final String key = trackKey;
+            decoder.submit(() -> {
+                DecodedTextures textures = buildTextures(cb, key);
+                if (textures != null) publishDecoded(textures);
+            });
+        }
+    }
+
+    /** Publish ready off-thread cover textures on the render thread. */
+    public void adoptDecodedIfReady(String trackKey, long nowNs) {
+        DecodedTextures ready = takeDecoded(trackKey);
+        if (ready == null) return;
+        // Retire the current cover to the "prev" slot and cross-fade to the new one
+        // rather than snapping. Both stay alive until the fade ends (releasePrev).
+        releasePrev();
+        coverPrevShader = coverShader;   // null on the very first cover
+        coverPrev = cover;
+        coverPrevAdjustedShader = coverAdjustedShader;
+        coverPrevAdjusted = coverAdjusted;
+        coverPrevAngles = coverPrevShader == null ? null : coverAngles;
+        coverPrevMesh = coverPrevShader == null ? null : coverMesh;
+        cover = ready.raw;
+        coverAdjusted = ready.adjusted;
+        coverKey = trackKey;
+        coverAngles = ready.angles;
+        coverMesh = ready.mesh;
+        coverShader = cover.makeShader(
+                FilterTileMode.CLAMP, FilterTileMode.CLAMP,
+                SamplingMode.LINEAR, Matrix33.IDENTITY);
+        coverAdjustedShader = coverAdjusted.makeShader(
+                FilterTileMode.CLAMP, FilterTileMode.CLAMP,
+                SamplingMode.LINEAR, Matrix33.IDENTITY);
+        fadeStartNs = nowNs;
+        invalidateStatic();   // the source changed -> the cached frame is stale
     }
 
     private synchronized void publishDecoded(DecodedTextures textures) {
