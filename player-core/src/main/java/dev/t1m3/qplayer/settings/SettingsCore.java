@@ -50,6 +50,8 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     public final Property<Double> bottomInset = new Property<>(0.0);
     public final Property<Double> leftInset = new Property<>(0.0);
     public final Property<Double> rightInset = new Property<>(0.0);
+    /** Hardware screen corner radius in logical px (0 on desktop / sharp corners). */
+    public final Property<Double> screenCornerRadius = new Property<>(0.0);
     /** Installed font families for the picker dialog. Not persisted. */
     public final Property<List<String>> availableFontFamilies =
             new Property<>(Collections.emptyList());
@@ -397,6 +399,12 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
     @Override
     public float topInset() {
         Double v = topInset.peek();
+        return v != null ? v.floatValue() : 0f;
+    }
+
+    @Override
+    public float screenCornerRadius() {
+        Double v = screenCornerRadius.peek();
         return v != null ? v.floatValue() : 0f;
     }
 

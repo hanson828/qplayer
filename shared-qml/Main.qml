@@ -965,6 +965,7 @@ Rectangle {
     LyricOverlay {
         id: lyricOverlay
         objectName: "lyricChrome"   // host renders this subtree in its own pass, over the fluid
+        miniPlayer: mini
         property real transitionEase: {
             var s = player.lyricSlide
             return s * s * (3 - 2 * s)
@@ -977,7 +978,7 @@ Rectangle {
         // TitleBar below), so the three title buttons sit flush at the very top.
         topPad: hostWindow.available ? 6 : settings.topInset + 6
         onCloseRequested: app.popPage()
-        y: (1 - transitionEase) * height
+        y: 0
     }
 
     TemperaLayer { anchors.fill: parent }

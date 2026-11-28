@@ -27,6 +27,145 @@ Item {
     // the host-drawn column move on exactly the same value.
     property real fullWidthK: player.lyricFullWidth
     property bool offsetPanelOpen: false
+    property var miniPlayer: null
+    readonly property real miniCoverSize: {
+        if (miniPlayer && miniPlayer.coverSize !== undefined && miniPlayer.coverSize > 0)
+            return miniPlayer.coverSize
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        return isGlass && !isWideBar ? 60 : (isWideBar ? 52 : 48)
+    }
+    readonly property real miniCoverRadius: {
+        if (miniPlayer && miniPlayer.coverRadius !== undefined && miniPlayer.coverRadius > 0)
+            return miniPlayer.coverRadius
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        return isGlass && !isWideBar ? (miniCoverSize / 2) : Ui.radiusSm
+    }
+    readonly property real miniCoverX: {
+        if (miniPlayer && miniPlayer.coverX !== undefined && miniPlayer.coverX > 0)
+            return miniPlayer.coverX - overlay.x
+        var sideW = overlay.landscape ? (overlay.width >= 840 ? 232 : 80) : 0
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var margin = isGlass ? 24 : 12
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        var pad = isGlass && !isWideBar ? 10 : 12
+        return sideW + margin + pad - overlay.x
+    }
+    readonly property real miniCoverY: {
+        if (miniPlayer && miniPlayer.coverY !== undefined && miniPlayer.coverY > 0)
+            return miniPlayer.coverY - overlay.y
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        var barH = isGlass && !isWideBar ? 80 : 64
+        var cSize = miniCoverSize
+        var botMargin = overlay.landscape ? (isGlass ? 24 : 12) : ((settings.bottomInset > 0 ? settings.bottomInset : 0) + 72)
+        var defY = overlay.height - botMargin - barH + (barH - cSize) / 2
+        return defY - overlay.y
+    }
+
+    readonly property real miniTransportX: {
+        if (miniPlayer && miniPlayer.transportTargetX !== undefined && miniPlayer.transportTargetX > 0)
+            return miniPlayer.transportTargetX - overlay.x
+        var sideW = overlay.landscape ? (overlay.width >= 840 ? 232 : 80) : 0
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var margin = isGlass ? 24 : 12
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        var barW = overlay.width - margin * 2
+        if (isWideBar) {
+            var tw = Math.min(460, barW * 0.44)
+            var trw = 40 * 4 + 44 + 6 * 4
+            return sideW + margin + (barW - tw) / 2 + (tw - trw) / 2 - overlay.x
+        } else {
+            var cw = 44 + 40 + 8
+            return sideW + margin + (barW - cw - 6 - 44) - overlay.x
+        }
+    }
+    readonly property real miniTransportY: {
+        if (miniPlayer && miniPlayer.transportTargetY !== undefined && miniPlayer.transportTargetY > 0)
+            return miniPlayer.transportTargetY - overlay.y
+        var isGlass = settings.has("liquidGlassNavigation") && settings.value("liquidGlassNavigation") === true
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        var barH = isGlass && !isWideBar ? 80 : 64
+        var botMargin = overlay.landscape ? (isGlass ? 24 : 12) : ((settings.bottomInset > 0 ? settings.bottomInset : 0) + 72)
+        var defY = overlay.height - botMargin - barH + (isWideBar ? 6 : (barH - 44) / 2)
+        return defY - overlay.y
+    }
+    readonly property real miniTransportWidth: {
+        if (miniPlayer && miniPlayer.transportTargetWidth !== undefined && miniPlayer.transportTargetWidth > 0)
+            return miniPlayer.transportTargetWidth
+        var isWideBar = overlay.landscape || overlay.width >= 720
+        return isWideBar ? (40 * 4 + 44 + 6 * 4) : 132
+    }
+    readonly property bool animating: player.lyricSlide > 0.001 && player.lyricSlide < 0.999
+    readonly property real chromeOpacity: Math.min(1, Math.max(0, (player.lyricSlide - 0.20) / 0.65))
+
+    readonly property real targetCoverSize: overlay.landscape
+        ? Math.max(120, Math.min((overlay.coverOnly ? overlay.width : overlay.width / 2) - 96, overlay.height - 248, 360))
+        : Math.max(160, Math.min(overlay.width - 96, overlay.height - 360, 420))
+
+    readonly property real targetCoverX: {
+        if (overlay.landscape) {
+            var colW = overlay.coverOnly ? overlay.width : overlay.width / 2
+            return (colW - targetCoverSize) / 2
+        } else {
+            return (overlay.width - targetCoverSize) / 2
+        }
+    }
+
+    readonly property real targetCoverY: {
+        if (overlay.landscape) {
+            var colH = targetCoverSize + 196
+            return (overlay.height - colH) / 2
+        } else {
+            return (overlay.height - targetCoverSize) / 2
+        }
+    }
+
+    readonly property real landscapeCoverSize: landscapeChrome.coverSize
+    readonly property real landscapeCoverX: landscapeChrome.x + (landscapeChrome.width - landscapeChrome.coverSize) / 2
+    readonly property real landscapeCoverY: (overlay.height - (landscapeChrome.coverSize + 196)) / 2
+
+    readonly property real currentCoverSize: overlay.landscape ? landscapeCoverSize : targetCoverSize
+    readonly property real currentCoverX: overlay.landscape ? landscapeCoverX : targetCoverX
+    readonly property real currentCoverY: overlay.landscape ? landscapeCoverY : targetCoverY
+    readonly property real targetTransportWidth: {
+        if (overlay.landscape) {
+            if (overlay.fullWidthK > 0.005) {
+                return overlay.width - 56
+            } else {
+                var colW = overlay.coverOnly ? overlay.width : overlay.width / 2
+                return Math.max(targetCoverSize, Math.min(colW - 48, 280))
+            }
+        } else {
+            return overlay.width - 56
+        }
+    }
+    readonly property real targetTransportX: {
+        if (overlay.landscape) {
+            if (overlay.fullWidthK > 0.005) {
+                return 28
+            } else {
+                var colW = overlay.coverOnly ? overlay.width : overlay.width / 2
+                return (colW - targetTransportWidth) / 2
+            }
+        } else {
+            return 28
+        }
+    }
+    readonly property real targetTransportY: {
+        if (overlay.landscape) {
+            if (overlay.fullWidthK > 0.005) {
+                return overlay.height - 152 + 16
+            } else {
+                var colH = targetCoverSize + 196
+                var colTop = (overlay.height - colH) / 2
+                return colTop + targetCoverSize + 20 + 196 - 20 - 50
+            }
+        } else {
+            return overlay.height - (settings.bottomInset + 12) - 8 - 50
+        }
+    }
     // Top row inset for the three title buttons. Desktop overrides this to 6
     // (Main.qml hides the custom title bar while the lyric page is open, so the
     // buttons sit flush at the very top of the window); mobile keeps the status
@@ -73,35 +212,47 @@ Item {
     }
 
     // Swallow taps on the empty (lyrics) area so they don't leak through.
-    MouseArea { anchors.fill: parent }
+    // Disable during closing animation so taps reach the MiniPlayer underneath.
+    MouseArea {
+        anchors.fill: parent
+        enabled: player.lyricsOpen
+    }
 
-    // --- portrait: big centred cover for no-lyric / instrumental tracks. It zooms +
-    // fades in/out on the lyrics↔cover switch (SPlayer's zoom transition) — no big/small
-    // morph, title/artist stay put. Landscape has its own cover in the left chrome.
+    // --- Hero Cover: unified cover for both portrait and landscape transitions ---
     PlaybackCoverImage {
-        id: pCover
-        animationActive: player.lyricSlide > 0.001 && !overlay.landscape && pCover.visible
-        // Big centred art for no-lyric / instrumental tracks. On the lyrics↔cover switch
-        // it ZOOMS + FADES (SPlayer's zoom transition) — no big/small morph. Kept
-        // rendering while fading out so the zoom-out plays over the appearing lyrics.
-        visible: !overlay.landscape && (overlay.coverOnly || opacity > 0.01)
-        property real coverSize: Math.max(160, Math.min(overlay.width - 96, overlay.height - 360, 420))
-        width: coverSize
-        height: coverSize
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.verticalCenter: parent.verticalCenter
-        radius: Math.min(width, height) * 0.06
-        iconSize: 72
+        id: heroCover
+        explicitDecodeSize: 1024
+        animationActive: player.lyricSlide > 0.001
+        readonly property bool heroAnimating: player.lyricSlide > 0.001 && player.lyricSlide < 0.999
+        heroProgress: heroAnimating ? overlay.transitionEase : (player.lyricSlide >= 0.999 ? 1.0 : 0.0)
+        visible: overlay.landscape ? (overlay.fullWidthK < 0.995) : (overlay.coverOnly || heroAnimating || opacity > 0.01)
+
+        x: heroAnimating
+            ? ((1 - overlay.transitionEase) * overlay.miniCoverX + overlay.transitionEase * overlay.currentCoverX)
+            : overlay.currentCoverX
+        y: heroAnimating
+            ? ((1 - overlay.transitionEase) * overlay.miniCoverY + overlay.transitionEase * overlay.currentCoverY)
+            : overlay.currentCoverY
+        width: heroAnimating
+            ? ((1 - overlay.transitionEase) * overlay.miniCoverSize + overlay.transitionEase * overlay.currentCoverSize)
+            : overlay.currentCoverSize
+        height: width
+        radius: heroAnimating
+            ? ((1 - overlay.transitionEase) * overlay.miniCoverRadius + overlay.transitionEase * (overlay.currentCoverSize * 0.06))
+            : (overlay.currentCoverSize * 0.06)
+        iconSize: overlay.landscape ? 64 : 72
         fadeIn: true
         playing: player.playing
-        // Off while the zoom/fade below is actually moving: this shadow is a real
-        // GPU blur pass (layer.effect, not a no-op — see the qml4j gotchas notes),
-        // and the host lyric column is doing its own zoom/alpha compositing on
-        // exactly the same switch at the same time. Two heavy things animating at
-        // once is what janks in this engine (no dirty-rect rendering — every
-        // animating subtree fully repaints every frame), not either one alone, so
-        // drop this one until both Behaviors below have actually reached their target.
-        layer.enabled: visible && opacity >= 0.999 && baseScale >= 0.999 && !pCover.vinyl
+        // Only the resolved local cover path, not the coverUrl fallback: on a track
+        // switch coverPath clears to "" until the new art is ready, so the placeholder
+        // shows through (fadeIn) instead of the previous song's cover lingering.
+        source: player.coverPath
+
+        layer.enabled: visible && !heroCover.vinyl && player.lyricSlide >= 0.995
+            && (overlay.landscape
+                ? (Math.abs(landscapeChrome.width - (overlay.coverOnly ? overlay.width : overlay.width / 2)) < 0.5
+                   && Math.abs(overlay.targetCoverSize - landscapeChrome.coverSize) < 0.5)
+                : (opacity >= 0.999 && baseScale >= 0.999))
         layer.effect: MultiEffect {
             shadowEnabled: true
             shadowColor: "#CC000000"
@@ -110,32 +261,51 @@ Item {
             shadowOpacity: 0.46
             blurMax: 48
         }
-        // Only the resolved local cover path, not the coverUrl fallback: on a track
-        // switch coverPath clears to "" until the new art is ready, so the placeholder
-        // shows through (fadeIn) instead of the previous song's cover lingering.
-        source: player.coverPath
-        // Zoom + fade in step with the host lyric column's own zoom (SPlayer's whole-
-        // content zoom): cover grows in as the lyrics shrink out, and vice versa.
-        property bool shown: overlay.coverOnly && player.lyricSlide > 0.25
-        opacity: shown ? 1 : 0
-        baseScale: shown ? 1 : 0.95
+
+        // Portrait: fades out when lyrics are showing once expanded. Landscape: stays visible.
+        property bool portraitShown: overlay.coverOnly && player.lyricSlide > 0.25
+        opacity: overlay.landscape ? 1.0 : (heroAnimating ? 1.0 : (portraitShown ? 1.0 : 0.0))
+        baseScale: overlay.landscape ? 1.0 : ((heroAnimating || portraitShown) ? 1.0 : 0.95)
         Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
         Behavior on baseScale { NumberAnimation { duration: 260; easing.type: Easing.OutBack } }
 
-        // Tap the cover to switch back to lyrics. A no-op when lyricsCoverOnly (no
-        // lyrics for this track) is what's actually forcing cover view — there's
-        // nothing to switch back to, so coverOnly just stays true either way.
+        // Tap the cover to switch back to lyrics.
         MouseArea {
             anchors.fill: parent
+            enabled: player.lyricsOpen && overlay.coverOnly
             onClicked: player.setCoverMode(false)
         }
     }
 
+    // --- Hero Transport: smoothly flies between lyric transport and mini player transport ---
+    Item {
+        id: heroTransport
+        visible: overlay.animating
+        x: (1 - overlay.transitionEase) * overlay.miniTransportX + overlay.transitionEase * overlay.targetTransportX
+        y: (1 - overlay.transitionEase) * overlay.miniTransportY + overlay.transitionEase * overlay.targetTransportY
+        width: (1 - overlay.transitionEase) * overlay.miniTransportWidth + overlay.transitionEase * overlay.targetTransportWidth
+        height: 50
+        opacity: Math.min(1.0, Math.max(0.0, (player.lyricSlide - 0.05) / 0.35))
+
+        LyricTransportRow {
+            anchors.fill: parent
+            gap: Math.max(4, Math.min(18, (heroTransport.width - 200) / 4))
+        }
+    }
+
+    readonly property real miniPlayerTopY: (miniPlayer && miniPlayer.playerY !== undefined && miniPlayer.playerY > 0)
+        ? (miniPlayer.playerY - overlay.y)
+        : (overlay.height - 80)
+    readonly property real containerTopY: (1 - overlay.transitionEase) * overlay.miniPlayerTopY
+    readonly property real topButtonsAnimY: overlay.animating
+        ? (overlay.containerTopY + overlay.topPad)
+        : overlay.topPad
+
     // --- top: dismiss + title + artist ---------------------------------
     IconButton {
         id: backBtn
-        anchors.top: parent.top
-        anchors.topMargin: overlay.topPad
+        opacity: overlay.chromeOpacity
+        y: overlay.topButtonsAnimY
         anchors.left: parent.left
         anchors.leftMargin: 6
         type: "standard"
@@ -157,8 +327,8 @@ Item {
         id: keepAwakeBtn
         objectName: "lyricKeepAwakeBtn"
         visible: settings.has("keepScreenOnPlayerPage")
-        anchors.top: parent.top
-        anchors.topMargin: overlay.topPad
+        opacity: overlay.chromeOpacity
+        y: overlay.topButtonsAnimY
         anchors.left: backBtn.right
         anchors.leftMargin: 6
         type: "standard"
@@ -190,8 +360,8 @@ Item {
     // lyricOffsetPanelOpen (see onOffsetPanelOpenChanged above).
     IconButton {
         id: offsetBtn
-        anchors.top: parent.top
-        anchors.topMargin: overlay.topPad
+        opacity: overlay.chromeOpacity
+        y: overlay.topButtonsAnimY
         anchors.right: parent.right
         anchors.rightMargin: 6
         type: "standard"
@@ -210,8 +380,8 @@ Item {
         id: coverModeBtn
         objectName: "lyricCoverModeBtn"
         visible: !overlay.coverOnly
-        anchors.top: parent.top
-        anchors.topMargin: overlay.topPad
+        opacity: overlay.chromeOpacity
+        y: overlay.topButtonsAnimY
         anchors.right: offsetBtn.left
         anchors.rightMargin: 6
         type: "standard"
@@ -229,8 +399,8 @@ Item {
         objectName: "lyricFullWidthBtn"
         visible: overlay.landscape && !overlay.coverOnly
                  && settings.has("lyricFullWidth")
-        anchors.top: parent.top
-        anchors.topMargin: overlay.topPad
+        opacity: overlay.chromeOpacity
+        y: overlay.topButtonsAnimY
         anchors.right: coverModeBtn.left
         anchors.rightMargin: 6
         type: "standard"
@@ -268,6 +438,7 @@ Item {
     MarqueeText {
         id: titleText
         visible: !overlay.landscape
+        opacity: overlay.chromeOpacity
         anchors.top: backBtn.bottom
         anchors.topMargin: 2
         anchors.left: parent.left
@@ -282,6 +453,7 @@ Item {
     MarqueeText {
         id: artistText
         visible: !overlay.landscape
+        opacity: overlay.chromeOpacity
         anchors.top: titleText.bottom
         anchors.topMargin: 4
         anchors.left: parent.left
@@ -309,6 +481,7 @@ Item {
     Item {
         id: transport
         visible: !overlay.landscape
+        opacity: overlay.chromeOpacity
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -366,6 +539,7 @@ Item {
             anchors.right: parent.right
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 8
+            opacity: overlay.animating ? 0 : 1
             gap: 18
         }
     }
@@ -410,114 +584,96 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             anchors.horizontalCenter: parent.horizontalCenter
 
-            PlaybackCoverImage {
-                id: lCover
-                animationActive: player.lyricSlide > 0.001 && overlay.landscape && overlay.fullWidthK < 0.995
+            // Invisible placeholder reserving space for the top-level heroCover
+            Item {
+                id: coverPlaceholder
                 anchors.top: parent.top
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: landscapeChrome.coverSize
                 height: landscapeChrome.coverSize
-                radius: Math.min(width, height) * 0.06
-                iconSize: 64
-                fadeIn: true
-                playing: player.playing
-                source: player.coverPath
-                // Same reasoning as the portrait cover: this is a real GPU blur
-                // pass, and landscapeChrome's width/coverSize (the cover<->lyrics
-                // switch here, since this column itself never fades out) animate
-                // at the same time the host lyric column is doing its own zoom -
-                // drop the shadow until both have actually reached their target.
-                layer.enabled: visible && !lCover.vinyl
-                    && Math.abs(landscapeChrome.width
-                        - (overlay.coverOnly ? overlay.width : overlay.width / 2)) < 0.5
-                    && Math.abs(landscapeChrome.coverSize - landscapeChrome.targetCoverSize) < 0.5
-                layer.effect: MultiEffect {
-                    shadowEnabled: true
-                    shadowColor: "#CC000000"
-                    shadowBlur: 0.65
-                    shadowVerticalOffset: 8
-                    shadowOpacity: 0.46
-                    blurMax: 48
-                }
+            }
 
-                // Same tap-to-return as the portrait cover above; harmless (no-op)
-                // when already showing lyrics.
-                MouseArea {
-                    anchors.fill: parent
-                    onClicked: player.setCoverMode(false)
-                }
-            }
-            MarqueeText {
-                id: lTitle
-                anchors.top: lCover.bottom
-                anchors.topMargin: 20
-                anchors.left: parent.left
-                anchors.right: parent.right
-                text: player.title
-                textColor: overlay.chromeFg
-                fontSize: Ui.textTitle2 + 2
-                fontWeight: Ui.weightBold
-                centered: true
-            }
-            MarqueeText {
-                id: lArtist
-                anchors.top: lTitle.bottom
-                anchors.topMargin: 4
-                anchors.left: parent.left
-                anchors.right: parent.right
-                text: player.artist
-                textColor: overlay.chromeFgSecondary
-                fontSize: Ui.textCallout
-                centered: true
-            }
-            MouseArea {
-                anchors.fill: lArtist
-                enabled: player.playingArtistIdsCsv !== "" || player.playingArtistId !== 0
-                hoverEnabled: enabled
-                cursorShape: Qt.PointingHandCursor
-                onClicked: player.openPlayingArtist()
-            }
-            LyricProgress {
-                id: lProgress
-                anchors.top: lArtist.bottom
-                anchors.topMargin: 22
-                anchors.left: parent.left
-                anchors.right: parent.right
-                wavy: settings.value("lyricProgressStyle") === 0
-                visible: player.lyricSlide > 0.001 && overlay.landscape && overlay.fullWidthK < 0.995
-                indeterminate: player.loading
-                value: player.lyricProgress
-            }
-            MouseArea {
-                anchors.fill: lProgress
-                anchors.topMargin: -10
-                anchors.bottomMargin: -10
-                onPressed: if (player.durationMs > 0)
-                               player.seek(Math.round(mouseX / width * player.durationMs))
-                onPositionChanged: if (pressed && player.durationMs > 0)
-                                       player.seek(Math.round(Math.max(0, Math.min(width, mouseX)) / width * player.durationMs))
-            }
-            Text {
-                anchors.left: parent.left
-                anchors.top: lProgress.bottom
-                anchors.topMargin: 6
-                text: overlay.fmt(player.positionMs)
-                color: overlay.chromeFgTertiary
-                font.pixelSize: Ui.textMicro
-            }
-            Text {
-                anchors.right: parent.right
-                anchors.top: lProgress.bottom
-                anchors.topMargin: 6
-                text: overlay.fmt(player.durationMs)
-                color: overlay.chromeFgTertiary
-                font.pixelSize: Ui.textMicro
-            }
-            LyricTransportRow {
+            Item {
+                id: colControls
+                anchors.top: parent.top
+                anchors.topMargin: landscapeChrome.coverSize + 20
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
-                gap: Math.max(4, Math.min(18, (col.width - 200) / 4))
+                opacity: overlay.chromeOpacity
+
+                MarqueeText {
+                    id: lTitle
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    text: player.title
+                    textColor: overlay.chromeFg
+                    fontSize: Ui.textTitle2 + 2
+                    fontWeight: Ui.weightBold
+                    centered: true
+                }
+                MarqueeText {
+                    id: lArtist
+                    anchors.top: lTitle.bottom
+                    anchors.topMargin: 4
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    text: player.artist
+                    textColor: overlay.chromeFgSecondary
+                    fontSize: Ui.textCallout
+                    centered: true
+                }
+                MouseArea {
+                    anchors.fill: lArtist
+                    enabled: player.playingArtistIdsCsv !== "" || player.playingArtistId !== 0
+                    hoverEnabled: enabled
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: player.openPlayingArtist()
+                }
+                LyricProgress {
+                    id: lProgress
+                    anchors.top: lArtist.bottom
+                    anchors.topMargin: 22
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    wavy: settings.value("lyricProgressStyle") === 0
+                    visible: player.lyricSlide > 0.001 && overlay.landscape && overlay.fullWidthK < 0.995
+                    indeterminate: player.loading
+                    value: player.lyricProgress
+                }
+                MouseArea {
+                    anchors.fill: lProgress
+                    anchors.topMargin: -10
+                    anchors.bottomMargin: -10
+                    onPressed: if (player.durationMs > 0)
+                                   player.seek(Math.round(mouseX / width * player.durationMs))
+                    onPositionChanged: if (pressed && player.durationMs > 0)
+                                           player.seek(Math.round(Math.max(0, Math.min(width, mouseX)) / width * player.durationMs))
+                }
+                Text {
+                    anchors.left: parent.left
+                    anchors.top: lProgress.bottom
+                    anchors.topMargin: 6
+                    text: overlay.fmt(player.positionMs)
+                    color: overlay.chromeFgTertiary
+                    font.pixelSize: Ui.textMicro
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.top: lProgress.bottom
+                    anchors.topMargin: 6
+                    text: overlay.fmt(player.durationMs)
+                    color: overlay.chromeFgTertiary
+                    font.pixelSize: Ui.textMicro
+                }
+                LyricTransportRow {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    opacity: overlay.animating ? 0 : 1
+                    gap: Math.max(4, Math.min(18, (col.width - 200) / 4))
+                }
             }
         }
     }
@@ -585,6 +741,7 @@ Item {
             anchors.rightMargin: 28
             anchors.top: parent.top
             anchors.topMargin: 16
+            opacity: overlay.animating ? 0 : 1
             gap: 20
         }
 

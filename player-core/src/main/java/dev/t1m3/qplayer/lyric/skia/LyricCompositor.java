@@ -10,12 +10,14 @@ import io.github.humbleui.skija.Paint;
 import io.github.humbleui.skija.SamplingMode;
 import io.github.humbleui.skija.Shader;
 import io.github.humbleui.skija.Surface;
+import io.github.humbleui.types.RRect;
 import io.github.humbleui.types.Rect;
 
 import io.github.timer_err.qml4j.engine.binding.Property;
 import io.github.timer_err.qml4j.render.QmlView;
 import io.github.timer_err.qml4j.render.Renderer;
 import io.github.timer_err.qml4j.render.items.core.Item;
+import io.github.timer_err.qml4j.runtime.member.MemberAccess;
 
 import dev.t1m3.qplayer.bridge.PlayerController;
 import dev.t1m3.qplayer.lyric.LyricLine;
@@ -62,6 +64,8 @@ public final class LyricCompositor {
          *  and progress along the bottom. Desktop-only setting, so this stays
          *  false on hosts that don't offer the row. */
         default boolean lyricFullWidth() { return false; }
+        /** Hardware screen corner radius in logical px (0 on desktop / sharp corners). */
+        default float screenCornerRadius() { return 0f; }
     }
 
     // Reserved height (logical px) for the lyric-page transport bar at the bottom
@@ -150,6 +154,17 @@ public final class LyricCompositor {
     private float lyShaderTopY = -1f;
     private Shader lyFadeShader;
     private final Paint lyMaskPaint = new Paint();
+
+    // Container transform animation (MiniPlayer <-> fullscreen lyric page).
+    private static final float LYRIC_SLIDE_TAU = 0.071f;
+    private long lyricSlideNs;
+    private Item miniPlayerItem;
+    private Rect expandingRect;
+    private RRect expandingRRect;
+    private Rect scrimRect;
+    private float scrimRectW = -1f, scrimRectH = -1f;
+    private final Paint scrimPaint = new Paint();
+    private final Paint cardBasePaint = new Paint();
 
     // Apple-Music progressive edge blur (opt-in). The column is drawn twice with two
     // COMPLEMENTARY masks that never overlap: a blurred copy kept only at the edges, and a
@@ -269,6 +284,8 @@ public final class LyricCompositor {
         blurBasePaint.close();
         columnBlurPaint.close();
         lyLayerPaint.close();
+        scrimPaint.close();
+        cardBasePaint.close();
     }
 
     /** Render-thread recreation resumes at a discontinuous playback position. */
@@ -373,6 +390,7 @@ public final class LyricCompositor {
         lyricChrome = view.findByObjectName("lyricChrome");
         collectNotificationCards(lyricChrome);
         Item miniPlayer = view.findByObjectName("miniPlayer");
+        miniPlayerItem = miniPlayer;
         if (miniPlayer != null) {
             MiniPlayerLoadingAnimation clock = new MiniPlayerLoadingAnimation(miniPlayer);
             clock.parent.set(miniPlayer);
@@ -404,6 +422,77 @@ public final class LyricCompositor {
         for (int i = 0; i < item.children.size(); i++) {
             collectNotificationCards(item.children.get(i));
         }
+    }
+
+    private Rect queryMiniPlayerRect(float viewW, float viewH) {
+        if (miniPlayerItem != null) {
+            try {
+                float x = 0f, y = 0f;
+                for (Item it = miniPlayerItem; it != null; it = it.parent.peek()) {
+                    x += it.x.peekFloat();
+                    y += it.y.peekFloat();
+                    if (it.parent.peek() == null || it == it.parent.peek()) break;
+                }
+                float w = miniPlayerItem.width.peekFloat();
+                float h = miniPlayerItem.height.peekFloat();
+                if (w > 20f && h > 20f && y > 0f) {
+                    return Rect.makeXYWH(x, y, w, h);
+                }
+            } catch (Throwable ignored) {}
+        }
+        return Rect.makeXYWH(12f, Math.max(0f, viewH - 80f), Math.max(0f, viewW - 24f), 64f);
+    }
+
+    private float queryMiniPlayerRadius(float miniH) {
+        if (miniPlayerItem != null) {
+            try {
+                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
+                if (lgProp != null && Boolean.TRUE.equals(lgProp.peek())) {
+                    return miniH * 0.5f;
+                }
+                Property<?> radProp = MemberAccess.propertyOf(miniPlayerItem, "radius");
+                if (radProp != null) {
+                    float r = radProp.peekFloat();
+                    if (r > 0f) return r;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return miniH * 0.5f;
+    }
+
+    private int queryMiniPlayerSurfaceColor(SettingsBridge settings) {
+        if (miniPlayerItem != null) {
+            try {
+                for (int i = 0; i < miniPlayerItem.children.size(); i++) {
+                    Item child = miniPlayerItem.children.get(i);
+                    if ("liquidGlassMiniPlayerSurface".equals(child.objectName.peek())) {
+                        Property<?> col = MemberAccess.propertyOf(child, "surfaceColor");
+                        if (col != null) {
+                            return Renderer.parseColor(String.valueOf(col.peek()));
+                        }
+                    }
+                }
+                Property<?> colProp = MemberAccess.propertyOf(miniPlayerItem, "color");
+                if (colProp != null) {
+                    String s = String.valueOf(colProp.peek());
+                    if (!s.isEmpty() && !"transparent".equalsIgnoreCase(s)) {
+                        return Renderer.parseColor(s);
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        boolean isDark = settings == null || settings.resolvedDarkValue();
+        return isDark ? 0xFF242424 : 0xFFFFFFFF;
+    }
+
+    private boolean isMiniPlayerLiquidGlass() {
+        if (miniPlayerItem != null) {
+            try {
+                Property<?> lgProp = MemberAccess.propertyOf(miniPlayerItem, "liquidGlass");
+                if (lgProp != null) return Boolean.TRUE.equals(lgProp.peek());
+            } catch (Throwable ignored) {}
+        }
+        return false;
     }
 
     /** Toast cards use translations and uniform scaling, with no rotation or clipping. */
@@ -492,6 +581,7 @@ public final class LyricCompositor {
                                  DirectContext ctx, float uiScale, int fbW, int fbH) {
         float lw = fbW / uiScale, lh = fbH / uiScale;
         if (lyricChrome == null) lyricChrome = view.findByObjectName("lyricChrome");
+        if (miniPlayerItem == null) miniPlayerItem = view.findByObjectName("miniPlayer");
 
         // Three layers so the lyric page slides up OVER the main UI while its md3
         // chrome still sits above the host fluid:
@@ -537,11 +627,38 @@ public final class LyricCompositor {
             // Fully covered and nothing changed: the whole main tree is skipped.
             skippedLayout = true;
         }
-        drawLyricOverlay(canvas, controller, settings, ctx, uiScale, fbW, fbH);
         double slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
+        if (!fullyCovered && slideNow > 0.001 && slideNow < 0.999) {
+            float ease = (float) (slideNow * slideNow * (3.0 - 2.0 * slideNow));
+            boolean isDark = settings == null || settings.resolvedDarkValue();
+            if (!isMiniPlayerLiquidGlass()) {
+                float maxAlpha = isDark ? 0.22f : 0.09f;
+                float scrimAlpha = Math.min(maxAlpha, ease * maxAlpha);
+                if (scrimAlpha > 0.001f) {
+                    if (scrimRect == null || scrimRectW != lw || scrimRectH != lh) {
+                        scrimRect = Rect.makeWH(lw, lh);
+                        scrimRectW = lw;
+                        scrimRectH = lh;
+                    }
+                    scrimPaint.setColor(isDark ? 0xFF000000 : 0xFF181818);
+                    scrimPaint.setAlpha(Math.round(scrimAlpha * 255f));
+                    int scS = canvas.save();
+                    canvas.scale(uiScale, uiScale);
+                    canvas.drawRect(scrimRect, scrimPaint);
+                    canvas.restoreToCount(scS);
+                }
+            }
+        }
+        drawLyricOverlay(canvas, controller, settings, ctx, uiScale, fbW, fbH);
+        slideNow = controller != null ? controller.lyricSlide.peek() : 0.0;
         if (slideNow > 0.001 && lyricChrome != null) {
             int scC = canvas.save();
             canvas.scale(uiScale, uiScale);
+            int clipChrome = -1;
+            if (slideNow < 0.999 && expandingRRect != null) {
+                clipChrome = canvas.save();
+                canvas.clipRRect(expandingRRect, true);
+            }
             if (fullyCovered && renderer.pictureCacheEnabled()) {
                 // renderSubtree() intentionally bypasses qml4j's picture cache. Once
                 // the lyric page is stable and fully covers the main scene, render it
@@ -554,6 +671,9 @@ public final class LyricCompositor {
                 renderer.render(canvas, lyricChrome, true);
             } else {
                 renderer.renderSubtree(canvas, lyricChrome, lw, lh);
+            }
+            if (clipChrome >= 0) {
+                canvas.restoreToCount(clipChrome);
             }
             canvas.restoreToCount(scC);
         }
@@ -568,11 +688,19 @@ public final class LyricCompositor {
         if (controller == null) return;
         boolean open = Boolean.TRUE.equals(controller.lyricsOpen.peek());
         float target = open ? 1f : 0f;
-        // The lyric page is a spatial bottom sheet, independent of the navigation
-        // page preset. Ease a little more slowly than the old 0.22 response while
-        // retaining the same interruptible, frame-stable approach.
-        lyricSlide += (target - lyricSlide) * 0.18f;
-        if (Math.abs(target - lyricSlide) < 0.002f) lyricSlide = target;
+        long slideNowNs = System.nanoTime();
+        if (Math.abs(target - lyricSlide) >= 0.001f) {
+            float dt = lyricSlideNs != 0L
+                    ? Math.min(0.05f, Math.max(0f, (slideNowNs - lyricSlideNs) / 1_000_000_000f))
+                    : (1f / 60f);
+            lyricSlide += (target - lyricSlide) * (1f - (float) Math.exp(-dt / LYRIC_SLIDE_TAU));
+        }
+        if (Math.abs(target - lyricSlide) < 0.001f) {
+            lyricSlide = target;
+            lyricSlideNs = 0L;
+        } else {
+            lyricSlideNs = slideNowNs;
+        }
         // Publish to QML so the LyricOverlay chrome fades in/out in lockstep. set()
         // no-ops on an unchanged value, so once settled-closed this stops bumping the
         // change version.
@@ -709,13 +837,46 @@ public final class LyricCompositor {
             colH = h - colTopY - L_TRANSPORT_H;
         }
         ensureLyricShaders(colTopY, colH);
+        boolean transitioning = lyricSlide < 0.999f;
+        float ease = transitioning ? lyricSlide * lyricSlide * (3f - 2f * lyricSlide) : 1f;
         int sc = canvas.save();
         canvas.scale(uiScale, uiScale);
 
-        // The page always slides up from the bottom over the main scene. Its QML
-        // chrome uses this same smoothstep progress, so both layers stay locked.
-        float ease = lyricSlide * lyricSlide * (3f - 2f * lyricSlide); // smoothstep
-        canvas.translate(0f, (1f - ease) * h);
+        int clipCount = -1;
+        if (transitioning) {
+            Rect miniBounds = queryMiniPlayerRect(w, h);
+            float startX = miniBounds.getLeft();
+            float startY = miniBounds.getTop();
+            float startW = miniBounds.getWidth();
+            float startH = miniBounds.getHeight();
+            float startR = queryMiniPlayerRadius(startH);
+            int surfaceColor = queryMiniPlayerSurfaceColor(settings);
+            boolean isLiquidGlass = isMiniPlayerLiquidGlass();
+
+            float curX = (1f - ease) * startX;
+            float curY = (1f - ease) * startY;
+            float curW = (1f - ease) * startW + ease * w;
+            float curH = (1f - ease) * startH + ease * h;
+            float targetR = settings != null ? settings.screenCornerRadius() : 0f;
+            float curR = (1f - ease) * startR + ease * targetR;
+
+            expandingRect = Rect.makeXYWH(curX, curY, curW, curH);
+            expandingRRect = RRect.makeXYWH(curX, curY, curW, curH, curR);
+            clipCount = canvas.save();
+            canvas.clipRRect(expandingRRect, true);
+
+            if (!isLiquidGlass) {
+                float baseAlpha = Math.max(0f, 1f - ease * 1.6f);
+                if (baseAlpha > 0.001f) {
+                    cardBasePaint.setColor(surfaceColor);
+                    cardBasePaint.setAlpha(Math.round(baseAlpha * 255f));
+                    canvas.drawRect(expandingRect, cardBasePaint);
+                }
+            }
+        } else {
+            expandingRect = null;
+            expandingRRect = null;
+        }
 
         // 1) fluid backdrop, keyed by the current track. The key only changes on a
         // track switch, so rebuild the concatenated string only when an input does.
@@ -731,16 +892,22 @@ public final class LyricCompositor {
         int bgStyle = settings != null
                 ? settings.lyricBgStyle() : FluidBackground.STYLE_MESH_GRADIENT;
         int bgSaturation = settings != null ? settings.lyricBgSaturation() : 100;
-        if (backdropClipRect == null || backdropClipW != w || backdropClipH != h) {
-            backdropClipRect = Rect.makeWH(w, h);
-            backdropClipW = w;
-            backdropClipH = h;
+        if (!transitioning) {
+            if (backdropClipRect == null || backdropClipW != w || backdropClipH != h) {
+                backdropClipRect = Rect.makeWH(w, h);
+                backdropClipW = w;
+                backdropClipH = h;
+            }
+            int bgClip = canvas.save();
+            canvas.clipRect(backdropClipRect);
+            fluidBg.render(canvas, ctx, uiScale, w, h, cover, lyCoverKey,
+                    System.nanoTime(), bgStatic, bgStyle, bgSaturation, 1.0f);
+            canvas.restoreToCount(bgClip);
+        } else {
+            float fluidAlpha = Math.min(1.0f, ease * 2.2f);
+            fluidBg.render(canvas, ctx, uiScale, w, h, cover, lyCoverKey,
+                    System.nanoTime(), bgStatic, bgStyle, bgSaturation, fluidAlpha);
         }
-        int bgClip = canvas.save();
-        canvas.clipRect(backdropClipRect);
-        fluidBg.render(canvas, ctx, uiScale, w, h, cover, lyCoverKey,
-                System.nanoTime(), bgStatic, bgStyle, bgSaturation);
-        canvas.restoreToCount(bgClip);
 
         // 2) the lyrics column. The title (top band) and transport (bottom band) are
         // drawn by the QML LyricOverlay on top of this; only the lyrics column is
@@ -847,6 +1014,9 @@ public final class LyricCompositor {
             canvas.restoreToCount(lc);
         }
 
+        if (clipCount >= 0) {
+            canvas.restoreToCount(clipCount);
+        }
         canvas.restoreToCount(sc);
     }
 
@@ -998,6 +1168,8 @@ public final class LyricCompositor {
      *  first edge-blur frame, glyph rasters on the first animated row). */
     private void releasePageCaches() {
         pageCachesReleased = true;
+        expandingRect = null;
+        expandingRRect = null;
         closeColumnSurface();
         lyricRenderer.releaseRasterCaches();
         // The backdrop's live render target and its cached static frame are GPU
