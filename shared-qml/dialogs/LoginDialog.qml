@@ -9,7 +9,6 @@ Item {
     id: dialog
 
     property bool active: false
-    property bool _loaded: active
     property int loginMode: -1 // 0 QR, 1 official website, 2 pasted Cookie, 3 app
     property bool ready: false
     property string cookieText: ""
@@ -55,16 +54,15 @@ Item {
 
     onActiveChanged: {
         if (active) {
-            dialog._loaded = true
             player.clearWebLoginError();
             loginMode = -1;
             cookieText = "";
             ready = false;
             modeSelectionTimer.restart();
-            if (loginSheetLoader.item) loginSheetLoader.item.open();
+            loginSheet.open();
         } else {
             modeSelectionTimer.stop();
-            if (loginSheetLoader.item && loginSheetLoader.item.opened) loginSheetLoader.item.close();
+            if (loginSheet.opened) loginSheet.close();
         }
     }
     onLoginModeChanged: {
@@ -87,14 +85,13 @@ Item {
         return i18n.t("login.qr.scan", player.loginProviderName);
     }
 
-    property int _qrPaintTick: 0
     Timer {
         id: revealTimer
         interval: 280
-        onTriggered: { dialog.ready = true; dialog._qrPaintTick = dialog._qrPaintTick + 1; }
+        onTriggered: { dialog.ready = true; qrCanvas.requestPaint(); }
     }
     property var qr: player.qrImage
-    onQrChanged: if (ready) dialog._qrPaintTick = dialog._qrPaintTick + 1
+    onQrChanged: if (ready) qrCanvas.requestPaint()
     property int st: player.qrStatus
     onStChanged: if (st === 803) dialog.closed()
 
@@ -107,280 +104,270 @@ Item {
         onTriggered: player.pollQrLogin()
     }
 
-    Loader {
-        id: loginSheetLoader
-        anchors.fill: parent
-        active: dialog._loaded
-        onLoaded: if (item && dialog.active) item.open()
-        sourceComponent: Component {
-            Dialog {
-                id: loginSheet
-                objectName: "loginDialog"
-                topInset: settings.topInset
-                bottomInset: settings.bottomInset
-                icon: "account_circle"
-                title: i18n.t("login.title", player.loginProviderName)
-                showAcceptButton: false
-                showRejectButton: !player.webLoginBusy
-                rejectText: i18n.t("common.cancel")
-                closeOnScrim: false
-                closeOnEscape: !player.webLoginBusy
-                onClosed: { player.cancelWebLogin(); dialog.closed() }
+    Dialog {
+        id: loginSheet
+        objectName: "loginDialog"
+        topInset: settings.topInset
+        bottomInset: settings.bottomInset
+        icon: "account_circle"
+        title: i18n.t("login.title", player.loginProviderName)
+        showAcceptButton: false
+        showRejectButton: !player.webLoginBusy
+        rejectText: i18n.t("common.cancel")
+        closeOnScrim: false
+        closeOnEscape: !player.webLoginBusy
+        onClosed: { player.cancelWebLogin(); dialog.closed() }
 
-                ColumnLayout {
-                    id: loginContent
-                    width: loginSheet.contentWidth
-                    spacing: Ui.space4
+        ColumnLayout {
+            id: loginContent
+            width: loginSheet.contentWidth
+            spacing: Ui.space4
 
-                    Text {
-                        Layout.fillWidth: true
-                        visible: !player.pluginLoginActive
-                                 || (!player.pluginLoginMethodsReady && player.webLoginError.length > 0)
-                        text: player.pluginLoginActive ? player.webLoginError : i18n.t("login.unsupported")
-                        wrapMode: Text.Wrap
-                        horizontalAlignment: Text.AlignHCenter
-                        color: Ui.textSecondary
-                        font.pixelSize: Ui.textCallout
-                    }
+            Text {
+                Layout.fillWidth: true
+                visible: !player.pluginLoginActive
+                         || (!player.pluginLoginMethodsReady && player.webLoginError.length > 0)
+                text: player.pluginLoginActive ? player.webLoginError : i18n.t("login.unsupported")
+                wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
+                color: Ui.textSecondary
+                font.pixelSize: Ui.textCallout
+            }
+
+            CircularProgress {
+                Layout.alignment: Qt.AlignHCenter
+                width: 48; height: 48
+                indeterminate: true
+                visible: player.pluginLoginActive && !player.pluginLoginMethodsReady
+                         && player.webLoginError.length === 0
+            }
+
+            TabRowWithContour {
+                objectName: "loginModeTabs"
+                visible: player.pluginLoginMethodsReady && modes.length > 1
+                Layout.fillWidth: true
+                Layout.preferredHeight: 40
+                equalWidth: false
+                selectOnClick: false
+                cornerRadius: Ui.radiusSm
+                backgroundColor: Ui.surfaceSunken
+                selectedBackgroundColor: Ui.accentSoft
+                selectedContentColor: Ui.accent
+                contentColor: Ui.textSecondary
+                property var modes: dialog.availableModes
+                tabs: {
+                    var app = player.loginAppLabel.length > 0
+                              ? player.loginAppLabel : i18n.t("login.mode.app")
+                    var labels = [i18n.t("login.mode.qr"), i18n.t("login.mode.web"), "Cookie", app]
+                    var out = []
+                    for (var i = 0; i < modes.length; i++) out.push(labels[modes[i]])
+                    return out
+                }
+                selectedTabIndex: modes.indexOf(dialog.loginMode)
+                onTabSelected: (index) => dialog.loginMode = modes[index]
+            }
+
+            // ---- QR -------------------------------------------------------------
+            Column {
+                Layout.fillWidth: true
+                width: parent.width
+                visible: player.pluginLoginMethodsReady && dialog.loginMode === 0
+                spacing: Ui.space3
+
+                Rectangle {
+                    // Give the QR a concrete square before the async matrix arrives.
+                    // A preferred size based on a nested layout's width can collapse to zero.
+                    // White on purpose in both themes: scanners need the light quiet zone.
+                    width: Math.max(0, Math.min(220, loginContent.width))
+                    height: width
+                    x: (parent.width - width) / 2
+                    radius: Ui.radiusMd
+                    color: "#ffffff"
 
                     CircularProgress {
-                        Layout.alignment: Qt.AlignHCenter
+                        anchors.centerIn: parent
                         width: 48; height: 48
                         indeterminate: true
-                        visible: player.pluginLoginActive && !player.pluginLoginMethodsReady
-                                 && player.webLoginError.length === 0
+                        visible: dialog.active && !qrCanvas.visible && !qrImg.visible
                     }
-
-                    TabRowWithContour {
-                        objectName: "loginModeTabs"
-                        visible: player.pluginLoginMethodsReady && modes.length > 1
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 40
-                        equalWidth: false
-                        selectOnClick: false
-                        cornerRadius: Ui.radiusSm
-                        backgroundColor: Ui.surfaceSunken
-                        selectedBackgroundColor: Ui.accentSoft
-                        selectedContentColor: Ui.accent
-                        contentColor: Ui.textSecondary
-                        property var modes: dialog.availableModes
-                        tabs: {
-                            var app = player.loginAppLabel.length > 0
-                                      ? player.loginAppLabel : i18n.t("login.mode.app")
-                            var labels = [i18n.t("login.mode.qr"), i18n.t("login.mode.web"), "Cookie", app]
-                            var out = []
-                            for (var i = 0; i < modes.length; i++) out.push(labels[modes[i]])
-                            return out
-                        }
-                        selectedTabIndex: modes.indexOf(dialog.loginMode)
-                        onTabSelected: (index) => dialog.loginMode = modes[index]
+                    // Some providers' QR encodes a token that only exists inside an
+                    // image their own endpoint returns (see qrImagePath) — shown
+                    // as-is instead of the host re-encoding qrContent into a matrix.
+                    Image {
+                        id: qrImg
+                        objectName: "loginQrImage"
+                        anchors.centerIn: parent
+                        width: Math.max(0, parent.width - 20); height: width
+                        fillMode: Image.PreserveAspectFit
+                        visible: player.qrImagePath.length > 0 && width > 0
+                        source: visible ? player.qrImagePath : ""
                     }
-
-                    // ---- QR -------------------------------------------------------------
-                    Column {
-                        Layout.fillWidth: true
-                        width: parent.width
-                        visible: player.pluginLoginMethodsReady && dialog.loginMode === 0
-                        spacing: Ui.space3
-
-                        Rectangle {
-                            // Give the QR a concrete square before the async matrix arrives.
-                            // A preferred size based on a nested layout's width can collapse to zero.
-                            // White on purpose in both themes: scanners need the light quiet zone.
-                            width: Math.max(0, Math.min(220, loginContent.width))
-                            height: width
-                            x: (parent.width - width) / 2
-                            radius: Ui.radiusMd
-                            color: "#ffffff"
-
-                            CircularProgress {
-                                anchors.centerIn: parent
-                                width: 48; height: 48
-                                indeterminate: true
-                                visible: dialog.active && !qrCanvas.visible && !qrImg.visible
-                            }
-                            // Some providers' QR encodes a token that only exists inside an
-                            // image their own endpoint returns (see qrImagePath) — shown
-                            // as-is instead of the host re-encoding qrContent into a matrix.
-                            Image {
-                                id: qrImg
-                                objectName: "loginQrImage"
-                                anchors.centerIn: parent
-                                width: Math.max(0, parent.width - 20); height: width
-                                fillMode: Image.PreserveAspectFit
-                                visible: player.qrImagePath.length > 0 && width > 0
-                                source: visible ? player.qrImagePath : ""
-                            }
-                            Canvas {
-                                id: qrCanvas
-                                objectName: "loginQrCanvas"
-                                anchors.centerIn: parent
-                                width: Math.max(0, parent.width - 20); height: width
-                                visible: !qrImg.visible
-                                         && dialog.ready && dialog.qr && dialog.qr.length > 0 && width > 0
-                                property int paintTickWatch: dialog._qrPaintTick
-                                onPaintTickWatchChanged: requestPaint()
-                                onWidthChanged: requestPaint()
-                                onPaint: {
-                                    if (!dialog.ready || width <= 0 || height <= 0) return;
-                                    var matrix = dialog.qr;
-                                    if (!matrix || matrix.length <= 0) return;
-                                    var ctx = getContext("2d");
-                                    ctx.fillStyle = "#ffffff";
-                                    ctx.fillRect(0, 0, width, height);
-                                    var size = matrix.length;
-                                    var cell = width / size;
-                                    ctx.fillStyle = "#000000";
-                                    for (var y = 0; y < size; y++) {
-                                        var row = matrix[y];
-                                        for (var x = 0; x < size; x++) {
-                                            if (row[x]) ctx.fillRect(
-                                                Math.floor(x * cell), Math.floor(y * cell),
-                                                Math.ceil(cell), Math.ceil(cell));
-                                        }
-                                    }
+                    Canvas {
+                        id: qrCanvas
+                        objectName: "loginQrCanvas"
+                        anchors.centerIn: parent
+                        width: Math.max(0, parent.width - 20); height: width
+                        visible: !qrImg.visible
+                                 && dialog.ready && dialog.qr && dialog.qr.length > 0 && width > 0
+                        onWidthChanged: requestPaint()
+                        onPaint: {
+                            if (!dialog.ready || width <= 0 || height <= 0) return;
+                            var matrix = dialog.qr;
+                            if (!matrix || matrix.length <= 0) return;
+                            var ctx = getContext("2d");
+                            ctx.fillStyle = "#ffffff";
+                            ctx.fillRect(0, 0, width, height);
+                            var size = matrix.length;
+                            var cell = width / size;
+                            ctx.fillStyle = "#000000";
+                            for (var y = 0; y < size; y++) {
+                                var row = matrix[y];
+                                for (var x = 0; x < size; x++) {
+                                    if (row[x]) ctx.fillRect(
+                                        Math.floor(x * cell), Math.floor(y * cell),
+                                        Math.ceil(cell), Math.ceil(cell));
                                 }
                             }
                         }
-
-                        Text {
-                            width: parent.width
-                            text: dialog.statusText(player.qrStatus)
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: player.qrStatus === 800 && player.webLoginError.length > 0
-                                   ? Ui.danger : Ui.textSecondary
-                            font.pixelSize: Ui.textCallout
-                        }
-                        Button {
-                            visible: player.loginAppOpenAvailable
-                            width: parent.width
-                            type: "filled"
-                            icon: "open_in_new"
-                            cornerRadius: Ui.radiusFull
-                            text: player.loginAppButtonLabel
-                            onClicked: player.openLoginApp()
-                        }
-                        Button {
-                            visible: player.qrStatus === 800
-                            width: parent.width
-                            type: "filledTonal"
-                            icon: "refresh"
-                            cornerRadius: Ui.radiusFull
-                            text: i18n.t("login.qr.retry")
-                            onClicked: player.startQrLogin()
-                        }
                     }
+                }
 
-                    // ---- One-tap app login ----------------------------------------------------
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: player.pluginLoginMethodsReady && dialog.loginMode === 3
-                        spacing: Ui.space4
-                        Text {
-                            Layout.fillWidth: true
-                            text: player.loginAppInstructions
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: Ui.textSecondary
-                            font.pixelSize: Ui.textCallout
-                        }
-                        Button {
-                            Layout.alignment: Qt.AlignHCenter
-                            type: "filled"
-                            icon: "open_in_new"
-                            cornerRadius: Ui.radiusFull
-                            text: player.qrStatus === 0
-                                  ? i18n.t("login.qr.loading") : player.loginAppButtonLabel
-                            enabled: player.loginAppOpenAvailable
-                            onClicked: player.openLoginApp()
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            text: dialog.statusText(player.qrStatus)
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: player.qrStatus === 800 && player.webLoginError.length > 0
-                                   ? Ui.danger : Ui.textSecondary
-                            font.pixelSize: Ui.textCallout
-                        }
-                        Button {
-                            Layout.alignment: Qt.AlignHCenter
-                            visible: player.qrStatus === 800
-                            type: "filledTonal"
-                            icon: "refresh"
-                            cornerRadius: Ui.radiusFull
-                            text: i18n.t("login.qr.retry")
-                            onClicked: player.startAppLogin()
-                        }
-                    }
+                Text {
+                    width: parent.width
+                    text: dialog.statusText(player.qrStatus)
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: player.qrStatus === 800 && player.webLoginError.length > 0
+                           ? Ui.danger : Ui.textSecondary
+                    font.pixelSize: Ui.textCallout
+                }
+                Button {
+                    visible: player.loginAppOpenAvailable
+                    width: parent.width
+                    type: "filled"
+                    icon: "open_in_new"
+                    cornerRadius: Ui.radiusFull
+                    text: player.loginAppButtonLabel
+                    onClicked: player.openLoginApp()
+                }
+                Button {
+                    visible: player.qrStatus === 800
+                    width: parent.width
+                    type: "filledTonal"
+                    icon: "refresh"
+                    cornerRadius: Ui.radiusFull
+                    text: i18n.t("login.qr.retry")
+                    onClicked: player.startQrLogin()
+                }
+            }
 
-                    // ---- Official website -------------------------------------------------------
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: player.pluginLoginMethodsReady && dialog.loginMode === 1
-                        spacing: Ui.space4
-                        Text {
-                            Layout.fillWidth: true
-                            text: player.loginWebInstructions
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: Ui.textSecondary
-                            font.pixelSize: Ui.textCallout
-                        }
-                        Button {
-                            Layout.alignment: Qt.AlignHCenter
-                            type: "filled"
-                            icon: "open_in_new"
-                            cornerRadius: Ui.radiusFull
-                            text: i18n.t(player.webLoginBusy ? "login.web.waiting" : "login.web.open")
-                            enabled: !player.webLoginBusy
-                            onClicked: player.startWebLogin()
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            visible: player.webLoginError.length > 0
-                            text: player.webLoginError
-                            wrapMode: Text.Wrap
-                            horizontalAlignment: Text.AlignHCenter
-                            color: Ui.danger
-                            font.pixelSize: Ui.textCaption
-                        }
-                    }
+            // ---- One-tap app login ----------------------------------------------------
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: player.pluginLoginMethodsReady && dialog.loginMode === 3
+                spacing: Ui.space4
+                Text {
+                    Layout.fillWidth: true
+                    text: player.loginAppInstructions
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Ui.textSecondary
+                    font.pixelSize: Ui.textCallout
+                }
+                Button {
+                    Layout.alignment: Qt.AlignHCenter
+                    type: "filled"
+                    icon: "open_in_new"
+                    cornerRadius: Ui.radiusFull
+                    text: player.qrStatus === 0
+                          ? i18n.t("login.qr.loading") : player.loginAppButtonLabel
+                    enabled: player.loginAppOpenAvailable
+                    onClicked: player.openLoginApp()
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: dialog.statusText(player.qrStatus)
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: player.qrStatus === 800 && player.webLoginError.length > 0
+                           ? Ui.danger : Ui.textSecondary
+                    font.pixelSize: Ui.textCallout
+                }
+                Button {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: player.qrStatus === 800
+                    type: "filledTonal"
+                    icon: "refresh"
+                    cornerRadius: Ui.radiusFull
+                    text: i18n.t("login.qr.retry")
+                    onClicked: player.startAppLogin()
+                }
+            }
 
-                    // ---- Pasted credential (Cookie) ---------------------------------------------
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: player.pluginLoginMethodsReady && dialog.loginMode === 2
-                        spacing: Ui.space3
-                        Text {
-                            Layout.fillWidth: true
-                            text: player.loginCredentialInstructions
-                            wrapMode: Text.Wrap
-                            color: Ui.textSecondary
-                            font.pixelSize: Ui.textCallout
-                        }
-                        TextField {
-                            overlayField: true
-                            Layout.fillWidth: true
-                            type: "outlined"
-                            label: player.loginCredentialLabel
-                            isPassword: true
-                            text: dialog.cookieText
-                            errorText: player.webLoginError
-                            onTextChanged: dialog.cookieText = text
-                            onAccepted: if (text.length > 0 && !player.webLoginBusy)
-                                player.submitCookieLogin(text)
-                        }
-                        Button {
-                            Layout.fillWidth: true
-                            type: "filled"
-                            cornerRadius: Ui.radiusFull
-                            text: i18n.t(player.webLoginBusy ? "login.web.verifying" : "login.web.verify")
-                            enabled: dialog.cookieText.trim().length > 0 && !player.webLoginBusy
-                            onClicked: player.submitCookieLogin(dialog.cookieText)
-                        }
-                    }
+            // ---- Official website -------------------------------------------------------
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: player.pluginLoginMethodsReady && dialog.loginMode === 1
+                spacing: Ui.space4
+                Text {
+                    Layout.fillWidth: true
+                    text: player.loginWebInstructions
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Ui.textSecondary
+                    font.pixelSize: Ui.textCallout
+                }
+                Button {
+                    Layout.alignment: Qt.AlignHCenter
+                    type: "filled"
+                    icon: "open_in_new"
+                    cornerRadius: Ui.radiusFull
+                    text: i18n.t(player.webLoginBusy ? "login.web.waiting" : "login.web.open")
+                    enabled: !player.webLoginBusy
+                    onClicked: player.startWebLogin()
+                }
+                Text {
+                    Layout.fillWidth: true
+                    visible: player.webLoginError.length > 0
+                    text: player.webLoginError
+                    wrapMode: Text.Wrap
+                    horizontalAlignment: Text.AlignHCenter
+                    color: Ui.danger
+                    font.pixelSize: Ui.textCaption
+                }
+            }
+
+            // ---- Pasted credential (Cookie) ---------------------------------------------
+            ColumnLayout {
+                Layout.fillWidth: true
+                visible: player.pluginLoginMethodsReady && dialog.loginMode === 2
+                spacing: Ui.space3
+                Text {
+                    Layout.fillWidth: true
+                    text: player.loginCredentialInstructions
+                    wrapMode: Text.Wrap
+                    color: Ui.textSecondary
+                    font.pixelSize: Ui.textCallout
+                }
+                TextField {
+                    overlayField: true
+                    Layout.fillWidth: true
+                    type: "outlined"
+                    label: player.loginCredentialLabel
+                    isPassword: true
+                    text: dialog.cookieText
+                    errorText: player.webLoginError
+                    onTextChanged: dialog.cookieText = text
+                    onAccepted: if (text.length > 0 && !player.webLoginBusy)
+                        player.submitCookieLogin(text)
+                }
+                Button {
+                    Layout.fillWidth: true
+                    type: "filled"
+                    cornerRadius: Ui.radiusFull
+                    text: i18n.t(player.webLoginBusy ? "login.web.verifying" : "login.web.verify")
+                    enabled: dialog.cookieText.trim().length > 0 && !player.webLoginBusy
+                    onClicked: player.submitCookieLogin(dialog.cookieText)
                 }
             }
         }

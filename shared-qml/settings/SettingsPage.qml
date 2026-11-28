@@ -213,34 +213,19 @@ Rectangle {
         }
     }
 
-    Loader {
+    FontPickerDialog {
         active: settings.fontPickerOpen
-        sourceComponent: Component {
-            FontPickerDialog {
-                active: settings.fontPickerOpen
-                targetKey: settings.fontPickerTarget
-                onClosed: settings.fontPickerOpen = false
-            }
-        }
+        targetKey: settings.fontPickerTarget
+        onClosed: settings.fontPickerOpen = false
     }
 
-    Loader {
-        active: settings.colorPickerKey.length > 0
-        sourceComponent: Component {
-            ColorPickerDialog { objectName: "settingsColorPicker" }
-        }
-    }
+    ColorPickerDialog { objectName: "settingsColorPicker" }
 
-    Loader {
+    ExportConfigDialog {
+        objectName: "settingsExportConfigDialog"
         active: settings.exportConfigOpen
-        sourceComponent: Component {
-            ExportConfigDialog {
-                objectName: "settingsExportConfigDialog"
-                active: settings.exportConfigOpen
-                onClosed: settings.exportConfigOpen = false
-                onExportEncrypted: settings.invoke("exportEncryptedSettings")
-                onExportPlain: settings.invoke("exportPlainSettings")
-            }
-        }
+        onClosed: settings.exportConfigOpen = false
+        onExportEncrypted: settings.invoke("exportEncryptedSettings")
+        onExportPlain: settings.invoke("exportPlainSettings")
     }
 }
