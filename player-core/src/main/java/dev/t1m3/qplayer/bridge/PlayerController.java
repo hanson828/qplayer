@@ -8181,13 +8181,16 @@ public final class PlayerController {
                 if (generation != homeGeneration.get() || homeNetworkGeneration == generation) return;
                 homeCachedGeneration = generation;
                 publishHomeSections(home.sections);
-                sourceRecommendPlaylists.set(Collections.unmodifiableList(
-                        new ArrayList<>(home.playlists)));
-                sourceRecommendations.set(Collections.unmodifiableList(
-                        new ArrayList<>(home.songs)));
+                sourceRecommendPlaylists.set(home.playlists != null
+                        ? Collections.unmodifiableList(new ArrayList<>(home.playlists))
+                        : Collections.emptyList());
+                sourceRecommendations.set(home.songs != null
+                        ? Collections.unmodifiableList(new ArrayList<>(home.songs))
+                        : Collections.emptyList());
                 homeLoading.set(false);
                 Logger.info("home: cached published ({} playlists, {} songs) in {} ms",
-                        home.playlists.size(), home.songs.size(),
+                        home.playlists != null ? home.playlists.size() : 0,
+                        home.songs != null ? home.songs.size() : 0,
                         (System.nanoTime() - startNs) / 1_000_000L);
             });
         } catch (Throwable ignored) {

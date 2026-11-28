@@ -117,6 +117,10 @@ public final class QPlayerActivity extends Activity {
     private static final java.util.concurrent.ExecutorService ENGINE_IO =
             java.util.concurrent.Executors.newSingleThreadExecutor(r ->
                     new Thread(r, "qplayer-engine-init"));
+    private static boolean postSplashAudioDone;
+    private static boolean postSplashDeferredDone;
+    private boolean postSplashScheduled;
+    private final Object postSplashToken = new Object();
     private static Object activeUiToken;
     private static Object boundUiToken;
     // Main-thread-owned; the retained view uses Application context, never an old window.
@@ -231,7 +235,11 @@ public final class QPlayerActivity extends Activity {
                 ((dev.t1m3.qplayer.android.app.QPlayerApplication) getApplication()).sceneResources();
         // A new scene must not replay event counters consumed by its predecessor.
         // A retained scene keeps its own watches and must keep those counters intact.
-        if (!reusedScene) controller.resetSceneEventRevisions();
+        if (!reusedScene) {
+            controller.resetSceneEventRevisions();
+            postSplashAudioDone = false;
+            postSplashDeferredDone = false;
+        }
         controller.setColorExtractor(new AndroidColorExtractor());
         // Copy-to-clipboard sink for the song menu's "复制链接". The QML action fires on
         // the render thread; ClipboardManager wants the main thread, so hop there.
@@ -403,6 +411,7 @@ public final class QPlayerActivity extends Activity {
         updateKeepScreenOn();
 
         if (!reusedScene) controller.loadHome();
+        if (reusedScene && (!postSplashAudioDone || !postSplashDeferredDone)) schedulePostSplash();
         registerDebugReceiver();
         // Wait for the first painted scene before presenting a permission dialog.
     }
@@ -627,21 +636,40 @@ public final class QPlayerActivity extends Activity {
         f.delete();
     }
 
-    /** First painted frame: the QML tree is fully built and rendering. Now hide the
-     *  splash and request the audio permission (and scan) — see onCreate. */
+    /** First painted frame: the QML tree is fully built and rendering. Fade out the
+     *  splash and defer permission dialogs, update check, and plugin catalog refresh
+     *  until the transition finishes. */
     private void onSceneReady() {
         if (destroyed || activeUiToken != uiToken || glView == null) return;
         logSceneLifecycle("ready reused=" + reusedScene
                 + " scene=" + Integer.toHexString(glView.sceneIdentity()));
         hideSplash();
-        if (reusedScene) return;
-        requestAudioPermission();
-        requestNotificationPermission();
-        // Don't auto-check for app updates on debug builds — only release builds nag.
-        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
-            controller.checkForUpdate();
+    }
+
+    private void schedulePostSplash() {
+        if (postSplashScheduled || destroyed || activeUiToken != uiToken) return;
+        if (postSplashAudioDone && postSplashDeferredDone) return;
+        postSplashScheduled = true;
+        if (mainHandler == null) mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        if (!postSplashAudioDone) {
+            mainHandler.postAtTime(() -> {
+                if (destroyed || activeUiToken != uiToken || postSplashAudioDone) return;
+                postSplashAudioDone = true;
+                requestAudioPermission();
+            }, postSplashToken, android.os.SystemClock.uptimeMillis() + 300);
         }
-        controller.refreshPluginCatalog();
+        if (!postSplashDeferredDone) {
+            mainHandler.postAtTime(() -> {
+                if (destroyed || activeUiToken != uiToken || postSplashDeferredDone) return;
+                postSplashDeferredDone = true;
+                requestNotificationPermission();
+                // Don't auto-check for app updates on debug builds — only release builds nag.
+                if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+                    controller.checkForUpdate();
+                }
+                controller.refreshPluginCatalog();
+            }, postSplashToken, android.os.SystemClock.uptimeMillis() + 600);
+        }
     }
 
     /** Playback state / track changed (main thread): poke the foreground service to
@@ -712,13 +740,26 @@ public final class QPlayerActivity extends Activity {
     }
 
     private void hideSplash() {
-        if (splashView == null) return;
+        if (splashView == null) {
+            schedulePostSplash();
+            return;
+        }
         final android.view.View v = splashView;
         splashView = null;
-        v.animate().alpha(0f).setDuration(280).withEndAction(() -> {
-            android.view.ViewParent p = v.getParent();
-            if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
-        }).start();
+        v.setClickable(false);
+        v.setFocusable(false);
+        v.animate()
+                .alpha(0f)
+                .setDuration(140)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .withEndAction(() -> {
+                    android.view.ViewParent p = v.getParent();
+                    if (p instanceof android.view.ViewGroup) ((android.view.ViewGroup) p).removeView(v);
+                    schedulePostSplash();
+                }).start();
+        if (mainHandler == null) mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        mainHandler.postAtTime(this::schedulePostSplash, postSplashToken,
+                android.os.SystemClock.uptimeMillis() + 250);
     }
 
     private void requestAudioPermission() {
@@ -1188,14 +1229,11 @@ public final class QPlayerActivity extends Activity {
         Context app = getApplicationContext();
         PlayerController target = controller;
         Object token = uiToken;
-        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
         AndroidLibraryScanner scanner = new AndroidLibraryScanner(
                 app.getContentResolver(), reader);
         new Thread(() -> {
             List<Track> tracks = scanner.scan();
-            main.post(() -> {
-                if (activeUiToken == token) target.scanTracks(tracks);
-            });
+            if (activeUiToken == token && target != null) target.scanTracks(tracks);
         }, "qplayer-scan").start();
     }
 
@@ -1261,6 +1299,7 @@ public final class QPlayerActivity extends Activity {
     protected void onDestroy() {
         logSceneLifecycle("destroy");
         destroyed = true;
+        if (mainHandler != null) mainHandler.removeCallbacksAndMessages(postSplashToken);
         boolean ownsUi = boundUiToken == uiToken;
         boolean retain = ownsUi && activeUiToken == uiToken && !isFinishing()
                 && glView != null && glView.hasScene();
