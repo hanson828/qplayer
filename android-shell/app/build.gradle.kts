@@ -62,7 +62,7 @@ android {
         create("perf") {
             initWith(getByName("release"))
             applicationIdSuffix = ".perf"
-            versionNameSuffix = "-perf"
+            versionNameSuffix = "-beta2"
             isDebuggable = false
             matchingFallbacks += "release"
             signingConfig = signingConfigs.getByName("debug")
